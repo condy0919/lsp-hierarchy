@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        emacs_version:
+          - '29.1'
+          - 'snapshot'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: purcell/setup-emacs@master
+      with:
+        version: ${{ matrix.emacs_version }}
+
+    - uses: emacs-eask/setup-eask@master
+      with:
+        version: 'snapshot'
+
+    - name: Install dependencies
+      run: |
+        eask install-deps --dev
+
+    - name: Compile
+      run: |
+        eask compile
+
+    - name: Lint
+      run: |
+        eask lint package
+
+    - name: Test
+      run: |
+        eask test ert ./test/lsp-hierarchy-test.el

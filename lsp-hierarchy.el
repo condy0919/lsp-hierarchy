@@ -5,7 +5,7 @@
 ;; Author: Zhiwei Chen <condy0919@gmail.com>
 ;; Keywords: languages, tools
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (lsp-mode "9.0") (dash "2.18.0") (f "0.20.0") (hierarchy "1.0"))
+;; Package-Requires: ((emacs "29.1") (lsp-mode "9.0") (hierarchy "1.0"))
 ;; Homepage: https://github.com/condy0919/lsp-hierarchy
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -29,8 +29,6 @@
 ;;; Code:
 
 (require 'lsp-mode)
-(require 'dash)
-(require 'f)
 (require 'cl-lib)
 (require 'outline)
 (require 'hierarchy)
