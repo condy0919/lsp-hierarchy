@@ -5,7 +5,7 @@
 ;; Author: Zhiwei Chen <condy0919@gmail.com>
 ;; Keywords: languages, tools
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (lsp-mode "9.0") (hierarchy "1.0"))
+;; Package-Requires: ((emacs "29.1") (lsp-mode "9.0"))
 ;; Homepage: https://github.com/condy0919/lsp-hierarchy
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -502,7 +502,7 @@ OUTGOING is non-nil for outgoing calls."
        :mode 'detached))))
 
 ;;;###autoload
-(defun lsp-show-call-hierarchy (&optional outgoing)
+(defun lsp-hierarchy-show-call (&optional outgoing)
   "Show the call hierarchy asynchronously.
 If OUTGOING is non-nil (or when called with a prefix argument),
 show outgoing calls.  Otherwise, show incoming calls."
@@ -519,7 +519,7 @@ show outgoing calls.  Otherwise, show incoming calls."
      :mode 'detached)))
 
 ;;;###autoload
-(defun lsp-show-type-hierarchy (&optional super)
+(defun lsp-hierarchy-show-type (&optional super)
   "Show the type hierarchy asynchronously.
 If SUPER is non-nil (or when called with a prefix argument),
 show supertypes.  Otherwise, show subtypes."

@@ -16,7 +16,6 @@
 
 (depends-on "emacs" "29.1")
 (depends-on "lsp-mode")
-(depends-on "hierarchy")
 
 (development
  (depends-on "ert-runner")
