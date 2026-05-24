@@ -91,7 +91,8 @@
 
 ;;; Core: Buffer State & Hash Storage
 
-(defvar-local lsp-hierarchy--source-buffer nil)
+(defvar-local lsp-hierarchy--source-buffer nil
+  "The buffer from which the hierarchy was requested.")
 (defvar-local lsp-hierarchy--state-table nil "Hash table mapping item to its open/close state.")
 (defvar-local lsp-hierarchy--loaded-table nil "Hash table mapping item to t if loaded.")
 (defvar-local lsp-hierarchy--loading-table nil "Hash table mapping item to t if loading.")
@@ -99,7 +100,9 @@
 ;;; Core: Rendering Engine
 
 (defun lsp-hierarchy--match-node-label (limit)
-  "Match function for font-lock to identify symbol node labels up to LIMIT."
+  "Match function for font-lock to identify symbol node labels up to LIMIT.
+This identifies the symbol name and its signature/details by looking
+for the `lsp-hierarchy-label-bound' property and parsing the text."
   (let ((found nil))
     (while (and (not found) (< (point) limit))
       (let ((bound (get-text-property (point) 'lsp-hierarchy-label-bound))
@@ -129,7 +132,9 @@
     found))
 
 (defun lsp-hierarchy--insert-node (item indent hierarchy)
-  "Render and insert hierarchy ITEM at INDENT level within HIERARCHY context."
+  "Render and insert hierarchy ITEM at INDENT level within HIERARCHY context.
+The rendered line includes indentation, expansion icons (for symbols),
+LSP kind abbreviations, the symbol label, and any extra details."
   (let* ((type (plist-get item :type))
          (label (plist-get item :label))
          (kind (plist-get item :kind))
@@ -179,7 +184,8 @@
 ;;; Core: Interaction Logic
 
 (defun lsp-hierarchy--set-subtree-visibility (flag)
-  "Set visibility of the current node's subtree based on hierarchical data."
+  "Set visibility of the current node's subtree based on FLAG.
+FLAG can be either \='hide or \='show."
   (let ((inhibit-read-only t)
         (current-indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent)))
     (when current-indent
@@ -237,7 +243,9 @@
         (lsp-hierarchy--load-async item indent h))))))
 
 (defun lsp-hierarchy--load-async (item indent hierarchy)
-  "Fetch and insert children asynchronously using hierarchy engine."
+  "Fetch and insert children of ITEM asynchronously.
+INDENT is the current indentation level.
+HIERARCHY is the hierarchy object used for state management."
   (let* ((cfn (plist-get item :children-fn))
          (precomputed (plist-get item :children))
          (tree-buf (current-buffer))
@@ -271,7 +279,7 @@
                                    (delete-region (line-beginning-position) (progn (forward-line 1) (point)))))
                                (goto-char marker)
                                (dolist (c (append precomputed async-children))
-                                 ;; 🌟 核心修正：调用标准的 hierarchy-add-tree 注册进引擎
+                                 ;; Register the child node in the hierarchy engine.
                                  (hierarchy-add-tree hierarchy c (lambda (_) item))
                                  (puthash c 'close lsp-hierarchy--state-table)
                                  (lsp-hierarchy--insert-node c (1+ indent) hierarchy))
@@ -284,7 +292,7 @@
       (puthash item t lsp-hierarchy--loaded-table))))
 
 (defun lsp-hierarchy-goto ()
-  "Jump to source."
+  "Jump to the source location of the item at point."
   (interactive)
   (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
          (goto-fn (plist-get item :goto-fn)))
@@ -305,10 +313,12 @@
 ;;; Regular Expression & Matchers
 
 (defvar lsp-hierarchy--outline-regexp
-  (rx line-start (* space) "@"))
+  (rx line-start (* space) "@")
+  "Regular expression to match the start of a hierarchy node line.")
 
 (defvar lsp-hierarchy--detail-regexp
-  (rx "[" (or "c" "m" "M" "I" "f" "s" "e" "C" "p" "v" "F") "]"))
+  (rx "[" (or "c" "m" "M" "I" "f" "s" "e" "C" "p" "v" "F") "]")
+  "Regular expression to match the LSP symbol kind abbreviation.")
 
 (defun lsp-hierarchy--match-icon-marker (limit)
   "Match function for font-lock to find icon markers up to LIMIT."
@@ -346,7 +356,8 @@
     ("(line [[:digit:]]*)" 0 'lsp-hierarchy-detail-face)
     (lsp-hierarchy--match-node-label
      (1 'lsp-hierarchy-node-face)
-     (3 'lsp-hierarchy-detail-face t t))))
+     (3 'lsp-hierarchy-detail-face t t)))
+  "Default font-lock keywords for `lsp-hierarchy-mode'.")
 
 (defvar lsp-hierarchy-mode-map
   (let ((map (make-sparse-keymap)))
@@ -356,7 +367,8 @@
     (define-key map (kbd "TAB") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "<tab>") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "RET") #'lsp-hierarchy-goto)
-    map))
+    map)
+  "Keymap for `lsp-hierarchy-mode'.")
 
 (define-derived-mode lsp-hierarchy-mode special-mode "LSP-Hierarchy"
   "Major mode for viewing LSP hierarchy views.
@@ -383,6 +395,11 @@
   (setq font-lock-defaults '(lsp-hierarchy-font-lock-keywords)))
 
 (defun lsp-hierarchy--display (lsp-roots source-buffer buffer-name title view-type outgoing-or-direction)
+  "Display the hierarchy for LSP-ROOTS in BUFFER-NAME.
+SOURCE-BUFFER is the original buffer where the request was made.
+TITLE is used as the mode name.
+VIEW-TYPE is either \='call or \='type.
+OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
   (let ((buf (get-buffer-create buffer-name))
         (h (hierarchy-new)))
     (with-current-buffer buf
@@ -407,7 +424,7 @@
             (when (eq view-type 'type)
               (setq item (plist-put item :goto-fn (lambda () (lsp-hierarchy--open-file (lsp-get root :uri) (lsp-get root :range))))))
 
-            ;; 🌟 调用标准的源码 API 注册根节点
+            ;; Register the root node in the hierarchy engine.
             (hierarchy-add-tree h item nil)
             (puthash item 'close lsp-hierarchy--state-table)
             (puthash item nil lsp-hierarchy--loaded-table)
@@ -418,6 +435,7 @@
 ;;; --- LSP Backends & Views Implementation ---
 
 (defun lsp-hierarchy--extract-line (uri range)
+  "Extract and format the code line at URI and RANGE."
   (let* ((filename (lsp--uri-to-path uri))
          (start (lsp-get range :start))
          (line-n (lsp-get start :line))
@@ -445,6 +463,7 @@
       (error (format "call at line %d" (1+ line-n))))))
 
 (defun lsp-hierarchy--open-file (uri range)
+  "Open file at URI and jump to RANGE."
   (let ((win (get-mru-window (selected-frame) nil t)))
     (if win
         (select-window win)
@@ -454,6 +473,9 @@
     (recenter)))
 
 (defun lsp-hierarchy--call-hierarchy-children (item sb callback outgoing)
+  "Fetch children for call hierarchy ITEM.
+SB is the source buffer.  CALLBACK is called with the results.
+OUTGOING is non-nil for outgoing calls."
   (let* ((method (if outgoing "callHierarchy/outgoingCalls" "callHierarchy/incomingCalls"))
          (lsp-p (plist-get item :lsp-item))
          (parent-uri (lsp-get lsp-p :uri)))
@@ -483,7 +505,9 @@
 
 ;;;###autoload
 (defun lsp-show-call-hierarchy (&optional outgoing)
-  "Show the incoming call hierarchy asynchronously."
+  "Show the call hierarchy asynchronously.
+If OUTGOING is non-nil (or when called with a prefix argument),
+show outgoing calls.  Otherwise, show incoming calls."
   (interactive "P")
   (unless (lsp-feature? "textDocument/prepareCallHierarchy")
     (user-error "Call hierarchy not supported by the current servers: %s"
@@ -498,7 +522,9 @@
 
 ;;;###autoload
 (defun lsp-show-type-hierarchy (&optional super)
-  "Show type hierarchy asynchronously."
+  "Show the type hierarchy asynchronously.
+If SUPER is non-nil (or when called with a prefix argument),
+show supertypes.  Otherwise, show subtypes."
   (interactive "P")
   (unless (lsp--find-workspaces-for "textDocument/typeHierarchy")
     (user-error "Type hierarchy not supported by the current servers: %s"
@@ -513,6 +539,9 @@
      :mode 'detached)))
 
 (defun lsp-hierarchy--type-hierarchy-children (item sb callback direction)
+  "Fetch children for type hierarchy ITEM.
+SB is the source buffer.  CALLBACK is called with the results.
+DIRECTION is \='supertypes or \='subtypes."
   (let ((method (if (eq direction 'supertypes) "typeHierarchy/supertypes" "typeHierarchy/subtypes"))
         (lsp-it (plist-get item :lsp-item)))
     (with-current-buffer sb
