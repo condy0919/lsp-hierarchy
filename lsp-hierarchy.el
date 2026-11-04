@@ -95,6 +95,9 @@
 (defvar-local lsp-hierarchy--loaded-table nil "Hash table mapping item to t if loaded.")
 (defvar-local lsp-hierarchy--loading-table nil "Hash table mapping item to t if loading.")
 
+(defvar-local lsp-hierarchy--generation nil
+  "Identity of the currently requested view, used to reject late responses.")
+
 ;;; Core: Rendering Engine
 
 (defun lsp-hierarchy--match-node-label (limit)
@@ -253,6 +256,7 @@ HIERARCHY is the hierarchy object used for state management."
          (precomputed (plist-get item :children))
          (tree-buf (current-buffer))
          (sb lsp-hierarchy--source-buffer)
+         (generation lsp-hierarchy--generation)
          (marker (save-excursion
                    (beginning-of-line)
                    (copy-marker (line-beginning-position 2)))))
@@ -271,7 +275,9 @@ HIERARCHY is the hierarchy object used for state management."
     (if cfn
         (funcall cfn item sb
                  (lambda (async-children)
-                   (when (buffer-live-p tree-buf)
+                   ;; Reusing a live buffer does not make an old result current.
+                   (when (and (buffer-live-p tree-buf)
+                              (eq generation (buffer-local-value 'lsp-hierarchy--generation tree-buf)))
                      (with-current-buffer tree-buf
                        (unwind-protect
                            (save-excursion
@@ -391,6 +397,7 @@ HIERARCHY is the hierarchy object used for state management."
   (setq-local indent-tabs-mode nil)
   (setq-local truncate-lines t)
 
+  (setq-local lsp-hierarchy--generation (make-symbol "lsp-hierarchy-view"))
   (setq-local lsp-hierarchy--state-table (make-hash-table :test 'equal))
   (setq-local lsp-hierarchy--loaded-table (make-hash-table :test 'equal))
   (setq-local lsp-hierarchy--loading-table (make-hash-table :test 'equal))
@@ -506,6 +513,31 @@ OUTGOING is non-nil for outgoing calls."
                    res)))
        :mode 'detached))))
 
+(defun lsp-hierarchy--prepare (view-type direction)
+  "Prepare VIEW-TYPE in DIRECTION, keeping only the latest requested view."
+  (let* ((source (current-buffer))
+         (name (if (eq view-type 'call) "*LSP Call Hierarchy*" "*LSP Type Hierarchy*"))
+         (view (get-buffer-create name))
+         (generation (make-symbol "lsp-hierarchy-view")))
+    ;; Invalidate child requests immediately, even while prepare is pending.
+    ;; Holding the buffer object also prevents a late result recreating a
+    ;; view which the user closed in the meantime.
+    (with-current-buffer view
+      (setq-local lsp-hierarchy--generation generation))
+    (lsp-request-async
+     (if (eq view-type 'call) "textDocument/prepareCallHierarchy" "textDocument/prepareTypeHierarchy")
+     (lsp--text-document-position-params)
+     (lambda (roots)
+       (when (and (buffer-live-p view)
+                  (eq generation (buffer-local-value 'lsp-hierarchy--generation view)))
+         (lsp-hierarchy--display
+          roots source name
+          (if (eq view-type 'call)
+              (if direction "Outgoing Calls" "Incoming Calls")
+            (if (eq direction 'supertypes) "Supertypes" "Subtypes"))
+          view-type direction)))
+     :mode 'alive)))
+
 ;;;###autoload
 (defun lsp-hierarchy-show-call (&optional outgoing)
   "Show the call hierarchy asynchronously.
@@ -515,13 +547,7 @@ show outgoing calls.  Otherwise, show incoming calls."
   (unless (lsp-feature? "textDocument/prepareCallHierarchy")
     (user-error "Call hierarchy not supported by the current servers: %s"
                 (-map #'lsp--workspace-print (lsp-workspaces))))
-  (let ((sb (current-buffer)))
-    (lsp-request-async
-     "textDocument/prepareCallHierarchy" (lsp--text-document-position-params)
-     (lambda (roots)
-       (lsp-hierarchy--display roots sb "*LSP Call Hierarchy*"
-                               (if outgoing "Outgoing Calls" "Incoming Calls") 'call outgoing))
-     :mode 'detached)))
+  (lsp-hierarchy--prepare 'call outgoing))
 
 ;;;###autoload
 (defun lsp-hierarchy-show-type (&optional super)
@@ -532,14 +558,7 @@ show supertypes.  Otherwise, show subtypes."
   (unless (lsp--find-workspaces-for "textDocument/typeHierarchy")
     (user-error "Type hierarchy not supported by the current servers: %s"
                 (-map #'lsp--workspace-print (lsp-workspaces))))
-  (let ((sb (current-buffer))
-        (direction (if super 'supertypes 'subtypes)))
-    (lsp-request-async
-     "textDocument/prepareTypeHierarchy" (lsp--text-document-position-params)
-     (lambda (roots)
-       (lsp-hierarchy--display roots sb "*LSP Type Hierarchy*"
-                               (if super "Supertypes" "Subtypes") 'type direction))
-     :mode 'detached)))
+  (lsp-hierarchy--prepare 'type (if super 'supertypes 'subtypes)))
 
 (defun lsp-hierarchy--type-hierarchy-children (item sb callback direction)
   "Fetch children for type hierarchy ITEM.
