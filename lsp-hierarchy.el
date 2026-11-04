@@ -1124,10 +1124,28 @@ RESTORE is an optional snapshot of expansion and point before refresh."
              (setf (lsp-hierarchy--saved-node-children saved)
                    (mapcar (lambda (child) (save-node child path))
                            (lsp-hierarchy--node-children node)))
+             (when-let* (((not (eq (lsp-hierarchy--node-load-state node) 'loaded)))
+                         (previous (lsp-hierarchy--node-restore node)))
+               ;; Another refresh may interrupt restoration.  Keep paths not
+               ;; loaded yet; snapshots of current rows override their old
+               ;; choices, including a branch the user has since folded.
+               (let ((replaced (make-hash-table :test 'eq)))
+                 (dolist (child (lsp-hierarchy--node-children node))
+                   (puthash (lsp-hierarchy--node-restore child) t replaced))
+                 (setf (lsp-hierarchy--saved-node-children saved)
+                       (append (lsp-hierarchy--saved-node-children saved)
+                               (seq-remove (lambda (child) (gethash child replaced))
+                                           (lsp-hierarchy--saved-node-children previous))))))
              saved)))
-      (let ((roots (mapcar (lambda (node) (save-node node nil))
-                          (lsp-hierarchy--view-roots lsp-hierarchy--view))))
-        (list :roots roots :focus focus)))))
+      (if-let* ((roots (lsp-hierarchy--view-roots lsp-hierarchy--view)))
+          (let ((saved (mapcar (lambda (node) (save-node node nil)) roots)))
+            (list :roots saved :focus focus))
+        ;; Before prepare finishes there are no new rows to snapshot.  Only
+        ;; the live focus slot may survive; the original snapshot's focus
+        ;; could already have been cancelled by a user command.
+        (when-let* (((memq (lsp-hierarchy--view-status lsp-hierarchy--view) '(loading error)))
+                    (roots (plist-get (lsp-hierarchy--view-restore lsp-hierarchy--view) :roots)))
+          (list :roots roots :focus (lsp-hierarchy--view-restore-focus lsp-hierarchy--view)))))))
 
 (defun lsp-hierarchy--match-restore (nodes snapshots)
   "Match fresh NODES to sibling SNAPSHOTS, preserving each occurrence.
