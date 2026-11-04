@@ -2208,5 +2208,73 @@
           (should (eq (key-binding (kbd "p")) #'lsp-hierarchy-previous-line)))))))
 
 
+(ert-deftest lsp-hierarchy-auto-expansion-stops-self-recursion-but-allows-manual-paths ()
+  (lsp-hierarchy-test--with-session
+    (let ((lsp-hierarchy-expand-depth 6))
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (lsp-hierarchy-test--roots "recursive")
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                   (vector (lsp-hierarchy-test--call "recursive")))
+        (let* ((root (car (lsp-hierarchy--view-roots lsp-hierarchy--view)))
+               (recursive (car (lsp-hierarchy--node-children root))))
+          (should (= 2 (length lsp-hierarchy-test--sent)))
+          (should-not (lsp-hierarchy--node-expanded recursive))
+          (should (eq (lsp-hierarchy--node-load-state recursive) 'unloaded))
+          (should (lsp-hierarchy-test--node-position recursive))
+          (lsp-hierarchy--goto-node recursive)
+          (lsp-hierarchy-toggle)
+          (should (= 3 (length lsp-hierarchy-test--sent)))
+          (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                     (vector (lsp-hierarchy-test--call "recursive")))
+          ;; Refresh replays the explicitly opened path, including recursive
+          ;; occurrences.  Only depth-driven discovery suppresses cycles.
+          (lsp-hierarchy-refresh)
+          (lsp-hierarchy-test--roots "recursive")
+          (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                     (vector (lsp-hierarchy-test--call "recursive")))
+          (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                     (vector (lsp-hierarchy-test--call "recursive")))
+          (should (= 6 (length lsp-hierarchy-test--sent)))
+          (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))))
+
+(ert-deftest lsp-hierarchy-auto-expansion-stops-mutual-outgoing-recursion ()
+  (lsp-hierarchy-test--with-session
+    (let ((lsp-hierarchy-expand-depth 10))
+      (with-current-buffer (lsp-hierarchy-test--show 'call t)
+        (lsp-hierarchy-test--roots "a")
+        (dolist (name '("b" "a"))
+          (lsp-hierarchy-test--reply
+           (car lsp-hierarchy-test--sent)
+           (vector (lsp-make-call-hierarchy-outgoing-call
+                    :to (lsp-hierarchy-test--item name) :from-ranges []))))
+        (let* ((root (car (lsp-hierarchy--view-roots lsp-hierarchy--view)))
+               (child (car (lsp-hierarchy--node-children root)))
+               (recursive (car (lsp-hierarchy--node-children child))))
+          (should (equal (lsp-hierarchy--node-name recursive) "a"))
+          (should-not (lsp-hierarchy--node-expanded recursive))
+          (should (eq (lsp-hierarchy--node-load-state recursive) 'unloaded))
+          (should (= 3 (length lsp-hierarchy-test--sent)))
+          (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))))
+
+(ert-deftest lsp-hierarchy-auto-expansion-keeps-shared-sibling-paths-independent ()
+  (lsp-hierarchy-test--with-session
+    (let ((lsp-hierarchy-expand-depth 3))
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--reply
+         (car lsp-hierarchy-test--sent)
+         (vector (lsp-hierarchy-test--call "a") (lsp-hierarchy-test--call "b")))
+        (dolist (request (seq-take lsp-hierarchy-test--sent 2))
+          (lsp-hierarchy-test--reply request (vector (lsp-hierarchy-test--call "shared"))))
+        (let ((a (car (lsp-hierarchy--node-children (lsp-hierarchy-test--node "a"))))
+              (b (car (lsp-hierarchy--node-children (lsp-hierarchy-test--node "b")))))
+          (should (equal (lsp-hierarchy--refresh-key a) (lsp-hierarchy--refresh-key b)))
+          (should-not (eq a b))
+          (should (eq (lsp-hierarchy--node-load-state a) 'loading))
+          (should (eq (lsp-hierarchy--node-load-state b) 'loading))
+          (should (= 6 (length lsp-hierarchy-test--sent)))
+          (should (= 2 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

@@ -724,6 +724,17 @@ A loading or failed branch is folded without cancelling or retrying it."
     (error (message "LSP hierarchy: could not redraw expansion: %s"
                     (lsp-hierarchy--error-message err)))))
 
+(defun lsp-hierarchy--recursive-occurrence-p (node)
+  "Return non-nil if NODE repeats a symbol on its own ancestor path."
+  (let ((workspace (lsp-hierarchy--node-workspace node))
+        (key (lsp-hierarchy--refresh-key node))
+        (ancestor (lsp-hierarchy--node-parent node)))
+    (while (and ancestor
+                (not (and (eq workspace (lsp-hierarchy--node-workspace ancestor))
+                          (equal key (lsp-hierarchy--refresh-key ancestor)))))
+      (setq ancestor (lsp-hierarchy--node-parent ancestor)))
+    ancestor))
+
 (defun lsp-hierarchy--expand-nodes (nodes depth)
   "Start expansion of NODES to DEPTH and publish their loading states together."
   (when nodes
@@ -731,7 +742,11 @@ A loading or failed branch is folded without cancelling or retrying it."
     ;; rows are published once after the batch, instead of once per sibling.
     (let ((lsp-hierarchy--batch-loading t))
       (dolist (node nodes)
-        (lsp-hierarchy--load-async node depth)))
+        ;; Depth already bounds recursion, but querying the same ancestor
+        ;; again adds no new relationship information.  Keep the occurrence
+        ;; closed for explicit expansion; other sibling paths stay independent.
+        (unless (lsp-hierarchy--recursive-occurrence-p node)
+          (lsp-hierarchy--load-async node depth))))
     (unless lsp-hierarchy--batch-loading (lsp-hierarchy--render-expansion))))
 
 (defun lsp-hierarchy--load-async (node &optional depth)
