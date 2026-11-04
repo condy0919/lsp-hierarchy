@@ -739,5 +739,42 @@
         (should (equal (lsp-get item :name) "operator\nnew"))
         (should (equal (lsp-get item :detail) "(\n int\t size)"))))))
 
+(ert-deftest lsp-hierarchy-empty-prepare-is-explained ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
+      (should (equal (buffer-string) "No hierarchy found.\n"))
+      (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))
+
+(ert-deftest lsp-hierarchy-error-row-can-retry-its-owner ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (lsp-make-json-error :code -32603 :message "Failed") t)
+      (should (string-match-p "Failed.*TAB to retry" (buffer-string)))
+      (goto-char (text-property-any (point-min) (point-max) 'lsp-hierarchy-status-node
+                                    (lsp-hierarchy-test--node "root")))
+      (lsp-hierarchy-smart-tab)
+      (should (= 3 (length lsp-hierarchy-test--sent)))
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (vector (lsp-hierarchy-test--call "child")))
+      (should-not (string-match-p "Failed" (buffer-string)))
+      (should (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child"))))))
+
+(ert-deftest lsp-hierarchy-failure-respects-folding-while-loading ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (lsp-make-json-error :code -32603 :message "Failed") t)
+      (let ((node (lsp-hierarchy-test--node "root")))
+        (should (eq (lsp-hierarchy--node-load-state node) 'error))
+        (should-not (lsp-hierarchy--node-expanded node)))
+      (should-not (string-match-p "Failed" (buffer-string))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

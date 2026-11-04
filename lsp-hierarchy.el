@@ -278,9 +278,16 @@ NO-MERGE preserves workspace ownership of responses."
   (lsp-hierarchy--insert-node node indent)
   (when (lsp-hierarchy--node-expanded node)
     (pcase (lsp-hierarchy--node-load-state node)
-      ('loading
-       (insert (propertize (concat (make-string (* (1+ indent) 2) ?\s) "  Loading...\n")
-                           'lsp-hierarchy-loading t 'lsp-hierarchy-status-node node)))
+      ((or 'loading 'error)
+       (let* ((loading (eq (lsp-hierarchy--node-load-state node) 'loading))
+              (text (if loading "Loading..."
+                      (concat (lsp-hierarchy--single-line
+                               (lsp-hierarchy--error-message (lsp-hierarchy--node-error node)))
+                              " (TAB to retry)"))))
+         (insert (propertize (concat (make-string (* (1+ indent) 2) ?\s) "  " text "\n")
+                             'face (if loading 'lsp-hierarchy-detail-face 'error)
+                             'lsp-hierarchy-loading loading
+                             'lsp-hierarchy-status-node node))))
       ('loaded
        (dolist (child (lsp-hierarchy--node-children node))
          (lsp-hierarchy--insert-subtree child (1+ indent)))))))
@@ -334,8 +341,10 @@ can insert rows anywhere above the user's current position."
                    ('loading (insert "Loading hierarchy...\n"))
                    ('error (insert "Unable to load hierarchy: "
                                    (lsp-hierarchy--error-message (lsp-hierarchy--view-error view)) "\n"))
-                   (_ (dolist (node (lsp-hierarchy--view-roots view))
-                        (lsp-hierarchy--insert-subtree node 0))))
+                   (_ (if (lsp-hierarchy--view-roots view)
+                          (dolist (node (lsp-hierarchy--view-roots view))
+                            (lsp-hierarchy--insert-subtree node 0))
+                        (insert "No hierarchy found.\n"))))
                  (buffer-string))))
     (let ((inhibit-read-only t))
       (atomic-change-group
@@ -358,10 +367,15 @@ An empty successful response is a leaf; an error remains retryable."
        (or (not (eq (lsp-hierarchy--node-load-state node) 'loaded))
            (lsp-hierarchy--node-children node))))
 
+(defun lsp-hierarchy--node-at-point ()
+  "Return the node or status row owner at point."
+  (or (lsp-hierarchy--get-prop 'lsp-hierarchy-item)
+      (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node)))
+
 (defun lsp-hierarchy-toggle ()
   "Toggle the node at point, loading its children when necessary."
   (interactive)
-  (let ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
+  (let ((node (lsp-hierarchy--node-at-point)))
     (unless node (user-error "No node here"))
     (cond
      ((not (lsp-hierarchy--expandable-p node)) (forward-line 1))
@@ -388,8 +402,7 @@ An empty successful response is a leaf; an error remains retryable."
         ((fail (err)
            (setf (lsp-hierarchy--node-request node) nil
                  (lsp-hierarchy--node-load-state node) 'error
-                 (lsp-hierarchy--node-error node) err
-                 (lsp-hierarchy--node-expanded node) nil)
+                 (lsp-hierarchy--node-error node) err)
            (lsp-hierarchy--render)
            (message "LSP hierarchy: %s (TAB to retry)" (lsp-hierarchy--error-message err)))
          (succeed (children)
@@ -439,7 +452,7 @@ An empty successful response is a leaf; an error remains retryable."
 (defun lsp-hierarchy-smart-tab ()
   "Toggle the node at point, or move to the next visible symbol."
   (interactive)
-  (if (lsp-hierarchy--expandable-p (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
+  (if (lsp-hierarchy--expandable-p (lsp-hierarchy--node-at-point))
       (lsp-hierarchy-toggle)
     (forward-line 1)
     (while (and (not (eobp))
