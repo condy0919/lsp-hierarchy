@@ -17,5 +17,18 @@
     (should (eq major-mode 'lsp-hierarchy-mode))
     (should (bound-and-true-p lsp-hierarchy--state-table))))
 
+(ert-deftest lsp-hierarchy-fontify-bare-symbol-test ()
+  "A symbol without a detail field must fontify without an exception."
+  (dolist (label '("foo" "foo signature"))
+    (with-temp-buffer
+      (lsp-hierarchy-mode)
+      (let ((inhibit-read-only t))
+        (lsp-hierarchy--insert-node
+         (list :type 'symbol :kind 12 :label label) 0 (hierarchy-new)))
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "foo")
+      (should (eq (get-text-property (1- (point)) 'face) 'lsp-hierarchy-node-face)))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

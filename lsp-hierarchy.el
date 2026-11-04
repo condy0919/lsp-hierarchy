@@ -121,7 +121,12 @@ for the `lsp-hierarchy-label-bound' property and parsing the text."
                       (setq sig-end end))
                     (set-match-data (list beg end
                                           beg name-end
-                                          (+ beg (match-beginning 2)) end
+                                          ;; The detail group is optional.  A
+                                          ;; bare symbol still needs valid
+                                          ;; match data for font-lock.
+                                          (when (match-beginning 2)
+                                            (+ beg (match-beginning 2)))
+                                          (when (match-end 2) end)
                                           sig-beg sig-end)))
                 (set-match-data (list beg end beg end)))
               (goto-char end)
