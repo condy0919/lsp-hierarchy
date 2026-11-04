@@ -592,16 +592,13 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
              (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node))
          node (or (lsp-hierarchy--node-parent node) (user-error "No parent node"))))))
 
-(defun lsp-hierarchy-collapse-or-parent ()
-  "Fold the current branch, or go to its parent if already closed."
+(defun lsp-hierarchy-collapse ()
+  "Fold the symbol owning the current row."
   (interactive)
   (let ((node (or (lsp-hierarchy--node-at-point) (user-error "No node here"))))
-    (if (and (not (lsp-hierarchy--get-prop 'lsp-hierarchy-call-site))
-             (lsp-hierarchy--node-expanded node) (lsp-hierarchy--expandable-p node))
-        (progn (setf (lsp-hierarchy--node-expanded node) nil)
-               (lsp-hierarchy--render)
-               (lsp-hierarchy--goto-node node))
-      (lsp-hierarchy-parent))))
+    (when (lsp-hierarchy--node-expanded node)
+      (setf (lsp-hierarchy--node-expanded node) nil)
+      (lsp-hierarchy--render))))
 
 (defun lsp-hierarchy-toggle ()
   "Toggle or retry the current branch; at a leaf or site, go to the next symbol."
@@ -667,7 +664,7 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (dolist (binding '(("n" . next-logical-line) ("p" . previous-logical-line)
-                       ("u" . lsp-hierarchy-parent) ("<left>" . lsp-hierarchy-collapse-or-parent)
+                       ("u" . lsp-hierarchy-parent) ("<left>" . lsp-hierarchy-collapse)
                        ("TAB" . lsp-hierarchy-toggle) ("<tab>" . lsp-hierarchy-toggle)
                        ("RET" . lsp-hierarchy-goto) ("SPC" . lsp-hierarchy-preview)
                        ("d" . lsp-hierarchy-switch-direction) ("g" . lsp-hierarchy-refresh)
