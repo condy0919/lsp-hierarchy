@@ -150,6 +150,12 @@ its identity; view roots and parent/child links own the model."
   "Regexp matching loaded symbol names and details, or nil for all nodes.
 Filtering reveals matching ancestor paths without changing expansion state.")
 
+(defvar-local lsp-hierarchy--row-positions nil
+  "Positions of the currently displayed node and status rows, keyed by node.")
+
+(defvar lsp-hierarchy--render-positions nil
+  "Row positions being built by the current render, before publication.")
+
 (defvar lsp-hierarchy--filter-matches nil
   "Nodes retained by the current render's filter projection, or nil.")
 
@@ -301,6 +307,8 @@ Show the URI and a line number starting at one, without reading files."
 (defun lsp-hierarchy--insert-node (item indent)
   "Insert ITEM at INDENT using its structured name and location."
   (let ((beg (point)))
+    (when lsp-hierarchy--render-positions
+      (puthash item (cons beg nil) lsp-hierarchy--render-positions))
     (insert (make-string (* indent 2) ?\s))
     (pcase (lsp-hierarchy--node-type item)
       ('code
@@ -469,6 +477,8 @@ or asks a language server to discover more nodes."
                      (concat (lsp-hierarchy--single-line
                               (lsp-hierarchy--error-message (lsp-hierarchy--node-error node)))
                              " (TAB to retry)"))))
+        (when lsp-hierarchy--render-positions
+          (setcdr (gethash node lsp-hierarchy--render-positions) (point)))
         (insert (apply #'propertize
                        (concat (make-string (* (1+ indent) 2) ?\s) "  " text "\n")
                        'face (if loading 'lsp-hierarchy-detail-face 'error)
@@ -494,11 +504,12 @@ or asks a language server to discover more nodes."
   (if (eq (car anchor) :end)
       (point-max)
     (let* ((node (car anchor))
-           (position (and node (nth 2 anchor)
-                          (text-property-any (point-min) (point-max)
-                                             'lsp-hierarchy-status-node node))))
-      (while (and node (not position))
-        (setq position (text-property-any (point-min) (point-max) 'lsp-hierarchy-item node)
+           (rows lsp-hierarchy--row-positions)
+           (position (and node rows (nth 2 anchor) (cdr (gethash node rows)))))
+      ;; Hidden descendants have no row entry.  Walking their parent links
+      ;; needs only table lookups, rather than scanning all text at each level.
+      (while (and node rows (not position))
+        (setq position (car (gethash node rows))
               node (lsp-hierarchy--node-parent node)))
       (save-excursion
         (goto-char (or position (point-min)))
@@ -510,6 +521,7 @@ or asks a language server to discover more nodes."
 Preserve point and each displaying window by node identity, since responses
 can insert rows anywhere above the user's current position."
   (let* ((view lsp-hierarchy--view)
+         (lsp-hierarchy--render-positions (make-hash-table :test 'eq))
          (close-icon lsp-hierarchy-icon-close)
          (open-icon lsp-hierarchy-icon-open)
          (detailed lsp-hierarchy-detailed-outline)
@@ -543,6 +555,9 @@ can insert rows anywhere above the user's current position."
       (atomic-change-group
         (erase-buffer)
         (insert text)))
+    ;; Positions describe the candidate text, so publish them only after the
+    ;; same text has replaced the buffer successfully.
+    (setq lsp-hierarchy--row-positions lsp-hierarchy--render-positions)
     (goto-char (lsp-hierarchy--anchor-position anchor))
     (dolist (entry windows)
       (when (window-live-p (car entry))
