@@ -45,18 +45,16 @@ In the hierarchy buffer:
 | `RET` | Jump to source and record the departure in xref history. |
 | `SPC` | Preview source in another window, keeping focus in the hierarchy. |
 | `n` / `p` | Move by logical lines with standard Emacs column and boundary behavior, including the final empty line. |
-| `u` | Move to the parent symbol, or from a call-site/status row to its owning symbol. |
-| `d` | Switch callers/callees or subtypes/supertypes at the original query position. |
-| `g` | Start a fresh query at the original position, using the initial expansion depth. |
+| `g` | Start a fresh query in the current direction at the original position, using the initial expansion depth. |
 | `?` | Show mode help. |
 
 Click an arrow to expand or fold, a symbol or call site to visit source, or an error row to retry. Hover over a symbol or call site to see its URI and line number. The mode line shows the current hierarchy direction.
 
-Custom bindings should replace `lsp-hierarchy-smart-tab` with `lsp-hierarchy-toggle`, and `lsp-hierarchy-next-line` / `lsp-hierarchy-previous-line` with `next-logical-line` / `previous-logical-line`. The independent `lsp-hierarchy-collapse-or-parent` and `lsp-hierarchy-collapse` commands and the mode's left-arrow binding have been removed; expand or fold with `TAB` or the node's arrow icon. Sibling navigation commands and the `M-n` / `M-p` bindings have also been removed.
+For custom bindings, use `lsp-hierarchy-toggle` for `TAB` and `next-logical-line` / `previous-logical-line` for `n` / `p`. Standalone parent, sibling, collapse, and direction-switch commands have been removed.
 
 Nodes load independently and can be folded while a request is pending. Late responses are cached without reopening folded branches. Known call sites appear as soon as their node is expanded, while deeper relationships load separately. Empty nodes become leaves; an empty root response displays `No hierarchy found.` Use `g` to retry a failed root query.
 
-Refresh and direction changes use a source marker that follows edits. Moving point elsewhere in the source buffer does not change this query position. `g` and `M-x revert-buffer` rebuild the tree using `lsp-hierarchy-expand-depth`. Replacing or closing a view cancels its pending requests and releases its source snapshots. To query another symbol, jump to its source and run a hierarchy command there.
+Refresh uses a source marker that follows edits. Moving point elsewhere in the source buffer does not change this query position. `g` and `M-x revert-buffer` rebuild the tree in the current direction using `lsp-hierarchy-expand-depth`. Replacing or closing a view cancels its pending requests and releases its source snapshots. To query another symbol or direction, run `lsp-hierarchy-show-call` or `lsp-hierarchy-show-type` at the source symbol, with or without `C-u` as shown above.
 
 An incoming-call view after expanding a caller:
 
@@ -81,7 +79,7 @@ An incoming-call view after expanding a caller:
 
 Automatic expansion stops when a symbol repeats along its ancestor path; the repeated occurrence can still be expanded manually. Symbol labels cover standard LSP kinds, and deprecated names use strike-through styling.
 
-Call-site text is read only for displayed call sites. Open source buffers supply their current contents, including unsaved edits; other files use snapshots captured on first read and retained for that view. Use `g` or `d` to rebuild the view and read updated files. Failed reads fall back to a line-number label.
+Call-site text is read only for displayed call sites. Open source buffers supply their current contents, including unsaved edits; other files use snapshots captured on first read and retained for that view. Use `g` to rebuild the view and read updated files. Failed reads fall back to a line-number label.
 
 `lsp-hierarchy-display-buffer-action` controls source jumps and previews through the standard Emacs display functions. Matching `display-buffer-alist` rules retain priority. Previews require another window and do not add xref history entries or run jump hooks.
 

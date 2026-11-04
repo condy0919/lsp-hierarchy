@@ -2,7 +2,7 @@
 
 本文档定义了 `lsp-hierarchy` 在**最简形式（Minimal Viable Form）**下的核心需求边界，并基于当前 [lsp-hierarchy.el](file:///home/condy/workspace/lsp-hierarchy/lsp-hierarchy.el)（1567 行）与 [test/lsp-hierarchy-test.el](file:///home/condy/workspace/lsp-hierarchy/test/lsp-hierarchy-test.el)（2812 行）梳理出所有可删减、可简化的代码模块，最后给出面向最简形式的重新实现架构。
 
-第一节按当前需求维护；上述行数及第二至九节的方案和实施记录保留为历史，对应各轮修改时的版本。最新折叠命令简化见第十节，第九节的独立折叠方案已被纠正。
+第一节按当前需求维护；上述行数及第二至十节的方案和实施记录保留为历史，对应各轮修改时的版本。最新导航与刷新简化见第十一节，第九节的独立折叠方案已由第十节纠正。
 
 ---
 
@@ -14,6 +14,7 @@
 1. **四种查询视图**：
    - Call Hierarchy：Incoming Calls（默认）与 Outgoing Calls（`C-u` 前缀）。
    - Type Hierarchy：Subtypes（默认）与 Supertypes（`C-u` 前缀）。
+   - 在源码符号处通过 `lsp-hierarchy-show-call` / `lsp-hierarchy-show-type` 及前缀选择方向。
 2. **异步按需展开与状态机**：
    - 每个树节点具备独立状态：`unloaded` $\to$ `loading` $\to$ `loaded` / `error`。
    - 支持初始展开深度 `lsp-hierarchy-expand-depth`（具备基础的同路径递归环路截断，防止自递归重复请求）。
@@ -25,9 +26,8 @@
    - `TAB`：展开/折叠节点、重试失败节点；在叶子节点上移至下一个可见符号。
    - `RET` / `mouse-1`：跳转到符号或调用点源码位置，并压入 `xref` 历史栈。
    - `SPC`：在另一窗口预览源码位置，焦点留在 Hierarchy 窗口，不污染 `xref` 栈。
-   - `n` / `p`：使用 Emacs 内置命令移至下/上一逻辑行，采用标准列保持和边界行为；`u`：回到父节点或当前行所属符号。
-   - `d`：在原查询位置原地切换方向（Incoming $\leftrightarrow$ Outgoing，Subtypes $\leftrightarrow$ Supertypes）。
-   - `g`：在原查询 `origin` marker 处重新发起查询。
+   - `n` / `p`：使用 Emacs 内置命令移至下/上一逻辑行，采用标准列保持和边界行为。
+   - `g`：保留当前方向，在原查询 `origin` marker 处重新发起查询。
 
 ### 2. 非核心/可舍弃需求（Out of Scope for Minimal Form）
 - **无需 `reroot`（`r`）与查询历史栈**：跨符号深入探索直接使用 `RET` 跳到源码（已记录在 `xref` 栈中，随时可 `M-,` 返回）再调起查询。
@@ -297,3 +297,11 @@ README 的模型与生命周期说明已同步；前文保留为原方案和第�
 README 和第一节核心按键已同步；第九节仅保留为已被本轮纠正的历史记录。删除独立折叠命令对应的测试要求，继续覆盖既有展开、折叠、重试和父节点导航行为。
 
 主文件由 731 行缩减为 723 行。在 Emacs 31.1 下，lsp-mode 10.0.0 / 10.0.1 × hash-table / plist 四组严格编译通过，各 53 项 ERT 全部通过，package-lint 通过。
+
+## 十一、 第八轮精简记录：移除父节点导航与视图内方向切换
+
+1. **删除独立导航命令**：移除 `lsp-hierarchy-parent`、`lsp-hierarchy-switch-direction` 及 `u` / `d` 绑定，并删除仅供父节点导航使用的 `lsp-hierarchy--goto-node`。节点的 `parent` 数据字段仍保留，供递归检测、祖先展开状态检查和重绘时的可见祖先回退使用。
+2. **刷新保留当前方向**：将 `lsp-hierarchy--restart` 合并到 `lsp-hierarchy-refresh`，删除方向切换分支。`g` / `revert-buffer` 继续在原始 marker 处按当前方向及初始深度重新查询，并释放旧请求和源码快照。
+3. **四种查询入口保留**：在源码符号处运行 `lsp-hierarchy-show-call` / `lsp-hierarchy-show-type`，通过有无 `C-u` 选择四种方向。README 与第一节核心按键集同步删除 `u` / `d`，前几轮方案及验证结果保留为历史。
+
+主文件由 723 行缩减为 695 行。在 Emacs 31.1 下，lsp-mode 10.0.0 / 10.0.1 × hash-table / plist 四组严格编译通过，各 53 项 ERT 全部通过，package-lint 通过。测试保留行移动、TAB、调用点跳转和重绘祖先回退，并验证四个方向下刷新保持方向、取消旧请求及拒绝旧响应。

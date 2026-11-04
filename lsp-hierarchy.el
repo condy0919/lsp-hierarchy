@@ -578,20 +578,6 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
         (lsp-hierarchy--view-status lsp-hierarchy--view) 'ready)
   (lsp-hierarchy--expand-nodes roots lsp-hierarchy-expand-depth))
 
-(defun lsp-hierarchy--goto-node (node)
-  "Go to NODE's symbol row."
-  (goto-char (or (and node (text-property-any (point-min) (point-max) 'lsp-hierarchy-item node))
-                 (user-error "Node is not visible"))))
-
-(defun lsp-hierarchy-parent ()
-  "Go to the parent symbol, or the owner of a call-site or status row."
-  (interactive)
-  (let ((node (or (lsp-hierarchy--node-at-point) (user-error "No node here"))))
-    (lsp-hierarchy--goto-node
-     (if (or (lsp-hierarchy--get-prop 'lsp-hierarchy-call-site)
-             (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node))
-         node (or (lsp-hierarchy--node-parent node) (user-error "No parent node"))))))
-
 (defun lsp-hierarchy-toggle ()
   "Toggle or retry the current branch; at a leaf or site, go to the next symbol."
   (interactive)
@@ -656,10 +642,9 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (dolist (binding '(("n" . next-logical-line) ("p" . previous-logical-line)
-                       ("u" . lsp-hierarchy-parent)
                        ("TAB" . lsp-hierarchy-toggle) ("<tab>" . lsp-hierarchy-toggle)
                        ("RET" . lsp-hierarchy-goto) ("SPC" . lsp-hierarchy-preview)
-                       ("d" . lsp-hierarchy-switch-direction) ("g" . lsp-hierarchy-refresh)
+                       ("g" . lsp-hierarchy-refresh)
                        ("?" . describe-mode)))
       (define-key map (kbd (car binding)) (cdr binding)))
     map)
@@ -676,8 +661,10 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t))
 
-(defun lsp-hierarchy--restart (switch)
-  "Repeat the query at its source marker, reversing direction if SWITCH."
+(defun lsp-hierarchy-refresh (&rest _)
+  "Query again at the original source marker, using the initial expansion depth.
+Ignore arguments supplied by `revert-buffer'."
+  (interactive)
   (unless (and (derived-mode-p 'lsp-hierarchy-mode) lsp-hierarchy--view)
     (user-error "Not in a hierarchy view"))
   (let ((target (current-buffer))
@@ -685,27 +672,12 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
         (direction (lsp-hierarchy--view-direction lsp-hierarchy--view)))
     (unless (and (markerp origin) (marker-buffer origin))
       (user-error "The hierarchy source buffer has been killed"))
-    (when switch
-      (setq direction (pcase direction
-                        ('incoming 'outgoing) ('outgoing 'incoming)
-                        ('subtypes 'supertypes) ('supertypes 'subtypes))))
     (with-current-buffer (marker-buffer origin)
       (save-restriction
         (widen)
         (save-excursion
           (goto-char origin)
           (lsp-hierarchy--prepare direction target))))))
-
-(defun lsp-hierarchy-refresh (&rest _)
-  "Query again at the original source marker, using the initial expansion depth.
-Ignore arguments supplied by `revert-buffer'."
-  (interactive)
-  (lsp-hierarchy--restart nil))
-
-(defun lsp-hierarchy-switch-direction ()
-  "Switch callers/callees or subtypes/supertypes at the original source marker."
-  (interactive)
-  (lsp-hierarchy--restart t))
 
 ;;;###autoload
 (defun lsp-hierarchy-show-call (&optional outgoing)
