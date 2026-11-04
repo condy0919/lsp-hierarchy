@@ -449,13 +449,17 @@
           (let* ((origin (current-buffer))
                  (workspace (lsp-hierarchy-test--workspace
                              'encoding (lsp-make-server-capabilities :positionEncoding "utf-16")))
+                 (lsp-hierarchy-display-buffer-action '(display-buffer-pop-up-window))
                  pushed jumped
                  (xref-after-jump-hook (list (lambda () (setq jumped (current-buffer))))))
             (setf (lsp--client-uri->path-fn (lsp--workspace-client workspace)) (lambda (_) file))
             (setq target (find-file-noselect file))
             (with-current-buffer target (narrow-to-region 1 5))
             (cl-letf (((symbol-function 'xref-push-marker-stack) (lambda () (setq pushed (current-buffer))))
-                      ((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (set-buffer buffer))))
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buffer action)
+                         (should (equal action lsp-hierarchy-display-buffer-action))
+                         (set-buffer buffer))))
               (lsp-hierarchy--open-file "custom://symbol" (lsp-hierarchy-test--range 1 2 5) workspace)
               (should (eq pushed origin))
               (should (eq jumped target))
@@ -978,6 +982,113 @@
         (lsp-hierarchy-previous-sibling)
         (should (eq (lsp-hierarchy--node-at-point) last))
         (should (= 1 (length lsp-hierarchy-test--sent)))))))
+
+(ert-deftest lsp-hierarchy-preview-preserves-focus-and-xref-history ()
+  (let ((file (make-temp-file "hierarchy-preview-" nil ".c" "head\n😀foo();\n")) target)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (with-temp-buffer
+            (lsp-hierarchy-mode)
+            (let* ((view (current-buffer))
+                   (origin-window (selected-window))
+                   (source-window (split-window-right))
+                   (workspace (lsp-hierarchy-test--workspace
+                               'encoding (lsp-make-server-capabilities :positionEncoding "utf-16")))
+                   (display-buffer-alist nil)
+                   pushed jumped)
+              (setf (lsp--client-uri->path-fn (lsp--workspace-client workspace)) (lambda (_) file))
+              (setq target (find-file-noselect file))
+              (with-current-buffer target (narrow-to-region 1 5))
+              (set-window-buffer source-window target)
+              (set-window-buffer origin-window view)
+              (let ((inhibit-read-only t))
+                (lsp-hierarchy--insert-node
+                 (lsp-hierarchy--make-node :type 'symbol :name "foo" :uri "custom://symbol"
+                                          :range (lsp-hierarchy-test--range 1 2 5)
+                                          :workspace workspace) 0))
+              (goto-char 3)
+              (let ((xref-after-jump-hook (list (lambda () (setq jumped t)))))
+                (cl-letf (((symbol-function 'xref-push-marker-stack) (lambda () (setq pushed t))))
+                  (lsp-hierarchy-preview)))
+              (should (eq (selected-window) origin-window))
+              (should (eq (current-buffer) view))
+              (should (= (point) 3))
+              (should-not pushed)
+              (should-not jumped)
+              (should (eq (window-buffer source-window) target))
+              (with-current-buffer target
+                (should-not (buffer-narrowed-p))
+                (goto-char (window-point source-window))
+                (should (looking-at-p "foo"))
+                ;; A second preview inside an existing restriction must not
+                ;; widen it or move the buffer's independent point.
+                (narrow-to-region (line-beginning-position) (line-end-position))
+                (goto-char (point-max)))
+              (lsp-hierarchy-preview)
+              (with-current-buffer target
+                (should (buffer-narrowed-p))
+                (should (= (point) (point-max)))
+                (save-excursion
+                  (goto-char (window-point source-window))
+                  (should (looking-at-p "foo")))))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (delete-file file))))
+
+(ert-deftest lsp-hierarchy-preview-honors-user-display-rules ()
+  (let ((file (make-temp-file "hierarchy-preview-rule-" nil ".c" "foo();\n")) target)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (with-temp-buffer
+            (lsp-hierarchy-mode)
+            (let* ((view (current-buffer))
+                   (origin-window (selected-window))
+                   (source-window (split-window-right))
+                   (lsp-hierarchy-display-buffer-action
+                    (list (lambda (&rest _) (ert-fail "Fallback overrode user display rule"))))
+                   (display-buffer-alist
+                    (list (list (regexp-quote (file-name-nondirectory file))
+                                (lambda (buffer _alist)
+                                  (set-window-buffer source-window buffer)
+                                  source-window)))))
+              (set-window-buffer origin-window view)
+              (setq target (find-file-noselect file))
+              (let ((inhibit-read-only t))
+                (lsp-hierarchy--insert-node
+                 (lsp-hierarchy--make-node :type 'symbol :name "foo" :uri (lsp--path-to-uri file)
+                                          :range (lsp-hierarchy-test--range 0 0 3)) 0))
+              (goto-char (point-min))
+              (lsp-hierarchy-preview)
+              (should (eq (selected-window) origin-window))
+              (should (eq (window-buffer source-window) target)))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (delete-file file))))
+
+(ert-deftest lsp-hierarchy-preview-rejects-same-window-display-safely ()
+  (let ((file (make-temp-file "hierarchy-preview-same-" nil ".c" "foo();\n")) target)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (with-temp-buffer
+            (lsp-hierarchy-mode)
+            (let* ((view (current-buffer))
+                   (window (selected-window))
+                   (display-buffer-alist
+                    '((".*" display-buffer-same-window (inhibit-same-window . nil)))))
+              (set-window-buffer window view)
+              (setq target (find-file-noselect file))
+              (let ((inhibit-read-only t))
+                (lsp-hierarchy--insert-node
+                 (lsp-hierarchy--make-node :type 'symbol :name "foo" :uri (lsp--path-to-uri file)
+                                          :range (lsp-hierarchy-test--range 0 0 3)) 0))
+              (goto-char 3)
+              (should-error (lsp-hierarchy-preview) :type 'user-error)
+              (should (eq (window-buffer window) view))
+              (should (eq (selected-window) window))
+              (should (= (point) 3)))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (delete-file file))))
 
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

@@ -61,6 +61,16 @@ Zero leaves roots closed; one loads their immediate children."
   :type 'string
   :group 'lsp-hierarchy)
 
+(defcustom lsp-hierarchy-display-buffer-action
+  '((display-buffer-reuse-window display-buffer-use-some-window display-buffer-pop-up-window)
+    (inhibit-same-window . t))
+  "Display action for source jumps and previews.
+This is passed to `display-buffer' and `pop-to-buffer', so matching rules
+in `display-buffer-alist' retain priority.  Preview requires a window
+other than the hierarchy window."
+  :type 'sexp
+  :group 'lsp-hierarchy)
+
 (defface lsp-hierarchy-node-face
   '((t :inherit font-lock-function-name-face :weight bold))
   "Face for symbol/function nodes."
@@ -524,15 +534,48 @@ A loading or failed branch is folded without cancelling or retrying it."
              node (lsp-hierarchy--view-source lsp-hierarchy--view) #'succeed #'fail token))
         (error (fail err))))))
 
-(defun lsp-hierarchy-goto ()
-  "Jump to the source location of the node at point."
-  (interactive)
+(defun lsp-hierarchy--location-node-at-point ()
+  "Return the node at point, signaling an error if it has no source location."
   (let ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
     (unless (and node (lsp-hierarchy--node-uri node) (lsp-hierarchy--node-range node))
       (user-error "No location for this node"))
+    node))
+
+(defun lsp-hierarchy-goto ()
+  "Jump to the source location of the node at point."
+  (interactive)
+  (let ((node (lsp-hierarchy--location-node-at-point)))
     (lsp-hierarchy--open-file (lsp-hierarchy--node-uri node)
-                              (lsp-hierarchy--node-range node)
-                              (lsp-hierarchy--node-workspace node))))
+                             (lsp-hierarchy--node-range node)
+                             (lsp-hierarchy--node-workspace node))))
+
+(defun lsp-hierarchy-preview ()
+  "Show the source location at point while keeping focus in the hierarchy.
+Preview does not add an xref history entry or run jump hooks."
+  (interactive)
+  (let* ((node (lsp-hierarchy--location-node-at-point))
+         (workspace (lsp-hierarchy--node-workspace node))
+         (filename (with-lsp-workspace workspace
+                     (lsp--uri-to-path (lsp-hierarchy--node-uri node))))
+         (buffer (find-file-noselect filename))
+         (origin-window (selected-window))
+         (origin-buffer (current-buffer))
+         (origin-point (point)))
+    (save-selected-window
+      (save-excursion
+        (let ((window (display-buffer buffer lsp-hierarchy-display-buffer-action)))
+          (unless (window-live-p window)
+            (user-error "No window available for source preview"))
+          ;; Respect the user's display rule, but never replace the tree with
+          ;; a preview.  Explain an incompatible same-window rule instead.
+          (when (eq window origin-window)
+            (set-window-buffer origin-window origin-buffer)
+            (set-window-point origin-window origin-point)
+            (user-error "Source preview needs another window; adjust its display action"))
+          (with-current-buffer buffer
+            (set-window-point window
+                              (lsp-hierarchy--location-point
+                               (lsp-hierarchy--node-range node) workspace))))))))
 
 (defun lsp-hierarchy-smart-tab ()
   "Toggle the node at point, or move to the next visible symbol."
@@ -571,6 +614,7 @@ A loading or failed branch is folded without cancelling or retrying it."
     (define-key map (kbd "TAB") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "<tab>") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "RET") #'lsp-hierarchy-goto)
+    (define-key map (kbd "SPC") #'lsp-hierarchy-preview)
     (define-key map (kbd "g") #'lsp-hierarchy-refresh)
     map)
   "Keymap for `lsp-hierarchy-mode'.")
@@ -682,19 +726,24 @@ with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
             (funcall read-line)))
       (error (format "call at line %d" (1+ line))))))
 
+(defun lsp-hierarchy--location-point (range workspace)
+  "Return RANGE's start in the current source buffer for WORKSPACE.
+Keep existing narrowing when it contains the location; otherwise widen so
+that the destination window can display the target."
+  (let ((target (save-restriction
+                  (widen)
+                  (save-excursion
+                    (lsp-hierarchy--position-to-point
+                     (lsp-get range :start) (lsp-hierarchy--position-encoding workspace))))))
+    (unless (<= (point-min) target (point-max)) (widen))
+    target))
+
 (defun lsp-hierarchy--open-file (uri range &optional workspace)
   "Open URI at RANGE using WORKSPACE's URI handling and xref history."
   (let ((filename (with-lsp-workspace workspace (lsp--uri-to-path uri))))
     (xref-push-marker-stack)
-    (pop-to-buffer (find-file-noselect filename)
-                   '((display-buffer-reuse-window display-buffer-pop-up-window)
-                     (inhibit-same-window . t)))
-    (let ((target (save-restriction
-                    (widen)
-                    (lsp-hierarchy--position-to-point
-                     (lsp-get range :start) (lsp-hierarchy--position-encoding workspace)))))
-      (unless (<= (point-min) target (point-max)) (widen))
-      (goto-char target))
+    (pop-to-buffer (find-file-noselect filename) lsp-hierarchy-display-buffer-action)
+    (goto-char (lsp-hierarchy--location-point range workspace))
     (run-hooks 'xref-after-jump-hook)))
 
 (defun lsp-hierarchy--symbol-node (item workspace &optional annotation)
