@@ -10,10 +10,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         emacs_version:
           - '29.1'
+          - '30.2'
           - 'snapshot'
+        lsp_objects: [hash-table, plist]
 
     steps:
     - uses: actions/checkout@v4
@@ -25,6 +28,12 @@ jobs:
     - uses: emacs-eask/setup-eask@master
       with:
         version: 'snapshot'
+
+    # LSP accessors depend on this setting at compile time.  Each matrix
+    # job installs and compiles its dependencies with one representation.
+    - name: Select plist protocol objects
+      if: matrix.lsp_objects == 'plist'
+      run: echo "LSP_USE_PLISTS=true" >> "$GITHUB_ENV"
 
     - name: Install dependencies
       run: |
