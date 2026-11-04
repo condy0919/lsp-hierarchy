@@ -97,6 +97,12 @@
 - **原因**：当 `filename` 不存在时，`(file-attributes filename)` 返回 `nil`，但函数仍会先执行 `(generate-new-buffer " *lsp-hierarchy-source*")` 并写入 `file-cache`，随后在 `insert-file-contents` 时抛错被外层捕获。这会在 `file-cache` 中残留一个空白 buffer，且每次重绘都会重试 `insert-file-contents`。
 - **建议**：当 `attrs` 为 `nil`（或文件不可读）时直接抛错或提前返回，或在 `insert-file-contents` 失败时清理 buffer。
 
+**核查与处理（部分成立，已修复）**
+
+- 失败读取会残留无效 buffer/缓存项，但不是完全失去引用的泄漏：原来的视图清理仍会释放它们。问题在于视图存活期间保留空缓存，重绘继续尝试读取。
+- 文件不存在时在分配 buffer 前报错；新缓存只在读取成功后发布。读取或更新失败时用 `unwind-protect` 清理该视图拥有的快照和缓存项。已访问文件的 buffer 优先使用，不因磁盘文件消失而清理用户的未保存内容。
+- 验证：覆盖不存在文件的重复读取、首次/更新时读取失败、部分读入和已访问文件；108 项 ERT 全部通过。
+
 ### 2. UTF-8 列位置换算在循环中逐字符分配字符串并调用编码器
 - **位置**：`lsp-hierarchy--position-to-point`（L908-L915）
 - **原因**：`"utf-8"` 分支在逐字符循环中调用 `(string-bytes (encode-coding-string (char-to-string char) 'utf-8))`，每次循环都会分配单字符字符串并进行编码转换。

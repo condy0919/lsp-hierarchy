@@ -981,19 +981,32 @@ with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
 (defun lsp-hierarchy--source-snapshot (filename)
   "Return a current buffer for FILENAME, reusing owned snapshots."
   (or (find-buffer-visiting filename)
-      (let* ((attrs (file-attributes filename))
-             (signature (list (file-attribute-modification-time attrs)
-                              (file-attribute-size attrs)))
-             (entry (gethash filename (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
-        (unless (and entry (buffer-live-p (cdr entry)))
-          (setq entry (cons nil (generate-new-buffer " *lsp-hierarchy-source*")))
-          (puthash filename entry (lsp-hierarchy--view-file-cache lsp-hierarchy--view)))
-        (unless (equal (car entry) signature)
-          (with-current-buffer (cdr entry)
-            (erase-buffer)
-            (insert-file-contents filename))
-          (setcar entry signature))
-        (cdr entry))))
+      (let* ((cache (lsp-hierarchy--view-file-cache lsp-hierarchy--view))
+             (entry (gethash filename cache))
+             (snapshot (cdr entry))
+             complete)
+        (unwind-protect
+            (let* ((attrs (or (file-attributes filename)
+                              (signal 'file-missing (list "Source file is missing" filename))))
+                   (signature (list (file-attribute-modification-time attrs)
+                                    (file-attribute-size attrs))))
+              ;; A missing file needs no buffer.  Publish new cache entries
+              ;; only after reading succeeds, including on remote I/O errors.
+              (unless (buffer-live-p snapshot)
+                (setq snapshot (generate-new-buffer " *lsp-hierarchy-source*")
+                      entry nil))
+              (unless (equal (car entry) signature)
+                (with-current-buffer snapshot
+                  (erase-buffer)
+                  (insert-file-contents filename))
+                (puthash filename (cons signature snapshot) cache))
+              (setq complete t)
+              snapshot)
+          ;; Failed refreshes can leave a formerly valid snapshot empty or
+          ;; partially read.  It is owned by this view, never a visited buffer.
+          (unless complete
+            (when (buffer-live-p snapshot) (kill-buffer snapshot))
+            (remhash filename cache))))))
 
 (defun lsp-hierarchy--extract-line (uri range &optional workspace)
   "Extract the first line of RANGE at URI using WORKSPACE's position encoding."

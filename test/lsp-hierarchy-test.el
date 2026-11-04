@@ -2276,5 +2276,70 @@
           (should (= 2 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))))
 
 
+(ert-deftest lsp-hierarchy-missing-snapshots-leave-no-cache-buffer ()
+  (let ((file (make-temp-file "hierarchy-missing-")))
+    (delete-file file)
+    (with-temp-buffer
+      (lsp-hierarchy-mode)
+      (let ((cache (lsp-hierarchy--view-file-cache lsp-hierarchy--view)))
+        (cl-letf (((symbol-function 'generate-new-buffer)
+                   (lambda (&rest _) (ert-fail "Missing files must not allocate snapshots"))))
+          (dotimes (_ 2)
+            (should-error (lsp-hierarchy--source-snapshot file) :type 'file-missing)))
+        (should (= 0 (hash-table-count cache)))
+        ;; Remove an older failed cache entry too, not just newly allocated ones.
+        (let ((stale (generate-new-buffer " *hierarchy-stale-source*")))
+          (puthash file (cons nil stale) cache)
+          (should-error (lsp-hierarchy--source-snapshot file) :type 'file-missing)
+          (should-not (buffer-live-p stale))
+          (should (= 0 (hash-table-count cache))))))))
+
+(ert-deftest lsp-hierarchy-failed-snapshot-reads-clean-new-and-stale-buffers ()
+  (let ((file (make-temp-file "hierarchy-read-failure-" nil ".c" "old();\n")))
+    (unwind-protect
+        (with-temp-buffer
+          (lsp-hierarchy-mode)
+          (let ((cache (lsp-hierarchy--view-file-cache lsp-hierarchy--view))
+                failed-buffer)
+            (cl-letf (((symbol-function 'insert-file-contents)
+                       (lambda (&rest _)
+                         (setq failed-buffer (current-buffer))
+                         (insert "partial")
+                         (signal 'file-error '("Unreadable source")))))
+              (should-error (lsp-hierarchy--source-snapshot file) :type 'file-error))
+            (should-not (buffer-live-p failed-buffer))
+            (should (= 0 (hash-table-count cache)))
+            (let ((snapshot (lsp-hierarchy--source-snapshot file)))
+              (with-temp-file file (insert "changed source();\n"))
+              (cl-letf (((symbol-function 'insert-file-contents)
+                         (lambda (&rest _) (signal 'file-error '("Read interrupted")))))
+                (should-error (lsp-hierarchy--source-snapshot file) :type 'file-error))
+              (should-not (buffer-live-p snapshot))
+              (should (= 0 (hash-table-count cache))))))
+      (delete-file file))))
+
+(ert-deftest lsp-hierarchy-missing-source-keeps-visited-buffer ()
+  (let* ((file (make-temp-file "hierarchy-visited-missing-" nil ".c" "saved();\n"))
+         (source (find-file-noselect file)))
+    (unwind-protect
+        (progn
+          (delete-file file)
+          (with-current-buffer source
+            (erase-buffer)
+            (insert "unsaved();\n"))
+          (with-temp-buffer
+            (lsp-hierarchy-mode)
+            (should (eq source (lsp-hierarchy--source-snapshot file)))
+            (should (= 0 (hash-table-count (lsp-hierarchy--view-file-cache lsp-hierarchy--view)))))
+          (should (buffer-live-p source))
+          (with-current-buffer source
+            (should (buffer-modified-p))
+            (should (equal (buffer-string) "unsaved();\n"))))
+      (when (buffer-live-p source)
+        (with-current-buffer source (set-buffer-modified-p nil))
+        (kill-buffer source))
+      (when (file-exists-p file) (delete-file file)))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
