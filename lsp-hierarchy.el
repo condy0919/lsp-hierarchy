@@ -365,34 +365,40 @@ An empty successful response is a leaf; an error remains retryable."
            (message "LSP hierarchy: %s (TAB to retry)" (lsp-hierarchy--error-message err)))
          (succeed (children)
            (condition-case err
-               (let ((inhibit-read-only t)
-                     expand)
+               (let* ((inhibit-read-only t)
+                      (nodes (append precomputed children))
+                      (view lsp-hierarchy--view)
+                      ;; Finish rendering before publishing any child.  An
+                      ;; invalid row must not leave half a response to retry.
+                      (text (with-temp-buffer
+                              (setq-local lsp-hierarchy--view view)
+                              (dolist (child nodes)
+                                (lsp-hierarchy--insert-node child (1+ indent)))
+                              (buffer-string))))
                  (save-excursion
                    (remove-loading)
                    (goto-char marker)
-                   (dolist (child (append precomputed children))
+                   (atomic-change-group (insert text))
+                   (dolist (child nodes)
                      (setf (lsp-hierarchy--node-parent child) item)
-                     (puthash (lsp-hierarchy--node-id child) child (lsp-hierarchy--view-nodes lsp-hierarchy--view))
-                     (let ((start (point)))
-                       (lsp-hierarchy--insert-node child (1+ indent))
-                       (when (and (> depth 1) (eq (lsp-hierarchy--node-type child) 'symbol))
-                         (push (cons child (copy-marker start t)) expand))))
+                     (puthash (lsp-hierarchy--node-id child) child
+                              (lsp-hierarchy--view-nodes view)))
                    (setf (lsp-hierarchy--node-load-state item) 'loaded
-                         (lsp-hierarchy--node-children item) (append precomputed children))
+                         (lsp-hierarchy--node-children item) nodes)
                    (goto-char origin)
                    (lsp-hierarchy--set-subtree-visibility
                     (if (lsp-hierarchy--node-expanded item) 'show 'hide))
                    (lsp-hierarchy--update-icon))
-                 ;; Keep a finite depth budget with this request.  Point may
-                 ;; have moved, and the user may have folded an ancestor.
-                 (unwind-protect
-                     (when (and (lsp-hierarchy--node-expanded item)
-                                (not (invisible-p origin)))
-                       (dolist (entry (reverse expand))
-                         (save-excursion
-                           (goto-char (cdr entry))
-                           (lsp-hierarchy--load-async (car entry) (1+ indent) (1- depth)))))
-                   (dolist (entry expand) (set-marker (cdr entry) nil)))
+                 ;; Expansion uses node identity after insertion, not markers
+                 ;; allocated while an incomplete response is being rendered.
+                 (when (and (> depth 1) (lsp-hierarchy--node-expanded item)
+                            (not (invisible-p origin)))
+                   (dolist (child nodes)
+                     (when (eq (lsp-hierarchy--node-type child) 'symbol)
+                       (save-excursion
+                         (goto-char (text-property-any (point-min) (point-max)
+                                                       'lsp-hierarchy-item child))
+                         (lsp-hierarchy--load-async child (1+ indent) (1- depth))))))
                  (finish))
              (error (fail err)))))
       ;; Send-time exceptions and asynchronous failures take the same path;
