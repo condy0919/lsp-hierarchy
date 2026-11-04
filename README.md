@@ -103,7 +103,7 @@ Call-site text is read only for visible rows. Open buffers supply their current 
 
 The implementation separates protocol conversion, model updates, and rendering:
 
-- A view owns its query context, roots, node registry, requests, and source snapshots.
+- A view owns its query context, roots, requests, and source snapshots.
 - A node represents one occurrence of a symbol along a tree path. Repeated symbols have independent state. Expansion is separate from loading (`unloaded`, `loading`, `loaded`, or `error`), so a request may finish while its node is folded.
 - Protocol adapters preserve the originating workspace and raw LSP item, including opaque server data. They return node data without inserting text or creating UI callbacks.
 - The renderer builds visible rows in a temporary buffer before replacing the display. Point and window positions are restored by node identity. Text properties locate model nodes; buffer indentation does not define the tree.

@@ -118,6 +118,12 @@
 - **位置**：`lsp-hierarchy--node`（L114）、`lsp-hierarchy--view`（L142）、`lsp-hierarchy--register-node`（L867-L873）
 - **原因**：每个节点都会生成 `(make-symbol "lsp-hierarchy-node")` 并通过 `lsp-hierarchy--register-node` 注册到哈希表 `lsp-hierarchy--view-nodes` 中，但 `lsp-hierarchy.el` 本体代码**没有任何地方读取**该哈希表或 `node-id`（目前仅测试辅助函数 `lsp-hierarchy-test--node` 在使用）。
 
+**核查与处理（已移除）**
+
+- 问题存在。生产代码只写入 `node-id`/`view-nodes`，实际渲染、导航和状态恢复都使用节点对象身份及父子链接；读取注册表的是测试辅助函数。
+- 删除每节点生成的 ID、视图注册表、注册函数及调用，使用 roots/children 持有模型。协议转换和异步结果安装时已有的 parent 链继续保留。测试改为遍历实际模型并以节点对象 `eq` 验证身份，同时更新 README。
+- 验证：原有多工作区、重复符号、回滚、隐藏节点和刷新身份测试继续有效；110 项 ERT 全部通过。
+
 ### 4. 全量重绘时的锚点查找开销
 - **位置**：`lsp-hierarchy--anchor-position`（L472-L486）
 - **原因**：当深层节点被折叠或过滤隐藏时，`while` 循环沿着 `parent` 链每一层都从 `point-min` 到 `point-max` 全文扫描一次 `text-property-any`。实际上在 `lsp-hierarchy--insert-subtree`（L438-L460）渲染期间即可直接记录可见节点的行首位置，或先通过模型判断祖先是否可见再扫描 buffer。

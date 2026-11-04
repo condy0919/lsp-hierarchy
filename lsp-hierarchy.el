@@ -110,8 +110,8 @@ other than the hierarchy window."
 (cl-defstruct (lsp-hierarchy--node (:constructor lsp-hierarchy--make-node))
   "One occurrence of an LSP item in a hierarchy view.
 Each occurrence has independent expansion and request state, even when
-several paths lead to the same protocol item."
-  (id (make-symbol "lsp-hierarchy-node"))
+several paths lead to the same protocol item.  The node object itself is
+its identity; view roots and parent/child links own the model."
   ;; Protocol items belong to their server, including any opaque `data'.
   workspace lsp-item type name kind detail annotation uri range
   ;; call-sites describe the incoming edge, not the shared symbol itself.
@@ -138,8 +138,7 @@ several paths lead to the same protocol item."
   restore restore-focus restore-window-focus
   (generation (make-symbol "lsp-hierarchy-view"))
   (requests (make-hash-table :test 'eq))
-  (file-cache (make-hash-table :test 'equal))
-  (nodes (make-hash-table :test 'eq)))
+  (file-cache (make-hash-table :test 'equal)))
 
 (defvar-local lsp-hierarchy--view nil
   "The model and resources owned by this buffer.")
@@ -716,7 +715,7 @@ A loading or failed branch is folded without cancelling or retrying it."
 
 (defun lsp-hierarchy--render-expansion ()
   "Publish automatic expansion states without invalidating loaded data."
-  ;; Requests have already started and their nodes are registered.  A display
+  ;; Requests have already started and their nodes belong to the tree.  A display
   ;; error here must not turn a successful parent response into a failed one:
   ;; retrying that parent would replace children whose requests are still live.
   (condition-case err
@@ -768,8 +767,8 @@ A loading or failed branch is folded without cancelling or retrying it."
            (let ((previous (lsp-hierarchy--node-children node))
                  (nodes (append (lsp-hierarchy--node-call-sites node) children)))
              ;; The renderer builds the entire candidate display off-screen.
-             ;; Publish the registry only once it succeeds; rollback the
-             ;; candidate children on failure so retry cannot duplicate rows.
+             ;; Roll back candidate children on failure so retry cannot
+             ;; duplicate rows or leave unreachable model occurrences.
              (setf (lsp-hierarchy--node-children node) nodes
                    (lsp-hierarchy--node-load-state node) 'loaded
                    (lsp-hierarchy--node-request node) nil)
@@ -777,10 +776,7 @@ A loading or failed branch is folded without cancelling or retrying it."
              (when-let* ((saved (lsp-hierarchy--node-restore node)))
                (lsp-hierarchy--match-restore nodes (lsp-hierarchy--saved-node-children saved)))
              (condition-case err
-                 (progn
-                   (lsp-hierarchy--render)
-                   (dolist (child nodes)
-                     (lsp-hierarchy--register-node child)))
+                 (lsp-hierarchy--render)
                (error
                 (setf (lsp-hierarchy--node-children node) previous)
                 (fail err)))
@@ -927,14 +923,6 @@ Failed requests can be retried by clicking their status row.
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t))
 
-(defun lsp-hierarchy--register-node (node)
-  "Register NODE and its already known descendants in the current view."
-  (puthash (lsp-hierarchy--node-id node) node
-           (lsp-hierarchy--view-nodes lsp-hierarchy--view))
-  (dolist (child (lsp-hierarchy--node-children node))
-    (setf (lsp-hierarchy--node-parent child) node)
-    (lsp-hierarchy--register-node child)))
-
 (defun lsp-hierarchy--display (roots)
   "Populate the current view from (WORKSPACE . ITEM) pairs in ROOTS."
   (let ((nodes (mapcar (lambda (entry)
@@ -945,8 +933,6 @@ Failed requests can be retried by clicking their status row.
     (when-let* ((state (lsp-hierarchy--view-restore lsp-hierarchy--view)))
       (lsp-hierarchy--match-restore nodes (plist-get state :roots)))
     (lsp-hierarchy--render)
-    (dolist (node nodes)
-      (lsp-hierarchy--register-node node))
     (if (lsp-hierarchy--view-restore lsp-hierarchy--view)
         (lsp-hierarchy--resume-restore nodes)
       (when (> lsp-hierarchy-expand-depth 0)
