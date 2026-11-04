@@ -1862,5 +1862,29 @@
           (should (lsp-hierarchy-test--node-position caller)))))))
 
 
+(ert-deftest lsp-hierarchy-filter-uses-visible-name-and-detail ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "foo" "other" "multi\nline")
+      (let ((foo (lsp-hierarchy-test--node "foo")))
+        (dolist (detail '(nil "" "  "))
+          (setf (lsp-hierarchy--node-detail foo) detail)
+          (dolist (regexp '("foo$" "foo\\'"))
+            (lsp-hierarchy-filter regexp)
+            (should (equal (lsp-hierarchy-test--visible-nodes) (list foo)))))
+        (setf (lsp-hierarchy--node-detail foo) "\n  signature")
+        (lsp-hierarchy-filter "^foo signature$")
+        (should (equal (lsp-hierarchy-test--visible-nodes) (list foo)))
+        (setq-local lsp-hierarchy-detailed-outline nil)
+        (lsp-hierarchy-filter "signature")
+        (should-not (lsp-hierarchy-test--visible-nodes))
+        (lsp-hierarchy-filter "^foo$")
+        (should (equal (lsp-hierarchy-test--visible-nodes) (list foo)))
+        (lsp-hierarchy-filter "^multi line$")
+        (should (equal (lsp-hierarchy-test--visible-nodes)
+                       (list (lsp-hierarchy-test--node "multi\nline")))))
+      (should (= 1 (length lsp-hierarchy-test--sent))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

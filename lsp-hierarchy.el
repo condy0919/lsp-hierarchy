@@ -291,6 +291,14 @@ Show the URI and a line number starting at one, without reading files."
                   (format ":%d" (1+ (lsp-get start :line))))))
     action))
 
+(defun lsp-hierarchy--display-detail (node)
+  "Return NODE's visible detail text, or nil when omitted."
+  (when-let* ((detail (and lsp-hierarchy-detailed-outline
+                          (lsp-hierarchy--node-detail node)))
+              (text (lsp-hierarchy--single-line (string-trim-left detail)))
+              ((not (string-empty-p text))))
+    text))
+
 (defun lsp-hierarchy--insert-node (item indent)
   "Insert ITEM at INDENT using its structured name and location."
   (let ((beg (point)))
@@ -322,10 +330,8 @@ Show the URI and a line number starting at one, without reading files."
                       (lsp-hierarchy--action-properties
                        #'lsp-hierarchy-goto
                        (lsp-hierarchy--location-help item "mouse-1, RET: Visit this symbol"))))
-       (when-let* ((detail (and lsp-hierarchy-detailed-outline
-                               (lsp-hierarchy--node-detail item)))
-                   ((not (string-empty-p detail))))
-         (insert (propertize (concat " " (lsp-hierarchy--single-line (string-trim-left detail)))
+       (when-let* ((detail (lsp-hierarchy--display-detail item)))
+         (insert (propertize (concat " " detail)
                              'face 'lsp-hierarchy-detail-face)))
        ;; These locations belong to this occurrence's incoming edge.  The
        ;; same symbol elsewhere in the tree may have a different site count.
@@ -374,8 +380,9 @@ or asks a language server to discover more nodes."
              (let ((direct (and (eq (lsp-hierarchy--node-type node) 'symbol)
                                 (string-match-p
                                  lsp-hierarchy-filter-regexp
-                                 (concat (lsp-hierarchy--node-name node) " "
-                                         (lsp-hierarchy--node-detail node)))))
+                                 (concat (lsp-hierarchy--single-line (lsp-hierarchy--node-name node))
+                                         (when-let* ((detail (lsp-hierarchy--display-detail node)))
+                                           (concat " " detail))))))
                    descendant)
                ;; Visit every loaded child, even beneath folded ancestors.
                (dolist (child (lsp-hierarchy--node-children node))

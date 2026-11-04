@@ -27,6 +27,12 @@
 - **原因**：`(concat (lsp-hierarchy--node-name node) " " (lsp-hierarchy--node-detail node))` 在 `detail` 为 `nil` 或空字符串时仍会在名字末尾拼接一个空格 `" "`。
 - **后果**：当节点没有 `detail` 时，用户输入正则 `foo$` 或 `foo\'` 无法匹配名为 `"foo"` 的符号；此外当 `lsp-hierarchy-detailed-outline` 为 `nil` 时，界面不显示 `detail`，但过滤依然会命中隐藏的 `detail` 文本。
 
+**核查与处理（已修复）**
+
+- 问题存在：无详情时确实多拼接了空格；关闭详细显示后也仍搜索隐藏详情。
+- 提取 `lsp-hierarchy--display-detail`，渲染与过滤共用详情的显示规则。只有实际显示的非空详情才追加分隔空格，名称和详情采用相同的单行规范化，过滤不搜索被显示选项隐藏的详情。
+- 验证：覆盖 `foo$`、字符串结尾锚点、nil/空白详情、隐藏详情和多行名称；89 项 ERT 全部通过。
+
 ### 3. 过滤状态下部分节点的展开图标与提示信息失真
 - **位置**：`lsp-hierarchy--icon-properties`（L804-L824）
 - **原因**：当某个已展开节点（`expanded = t`）自身匹配过滤正则，但其所有子节点均不匹配时，`lsp-hierarchy--expanded-for-display-p`（L431-L436）仍返回 `t`。
