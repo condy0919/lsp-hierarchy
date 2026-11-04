@@ -223,5 +223,66 @@
       (should (string-match-p "Unable to load hierarchy" (buffer-string)))
       (should-not (string-match-p "Loading" (buffer-string))))))
 
+(ert-deftest lsp-hierarchy-rejects-unsupported-servers ()
+  (lsp-hierarchy-test--with-session
+    (setq lsp-hierarchy-test--workspaces
+          (list (lsp-hierarchy-test--workspace 'unsupported)))
+    (should-error (lsp-hierarchy-test--show 'call) :type 'user-error)
+    (should-error (lsp-hierarchy-test--show 'type) :type 'user-error)
+    (should-not lsp-hierarchy-test--sent)))
+
+(ert-deftest lsp-hierarchy-accepts-dynamic-registrations ()
+  (dolist (kind '(call type))
+    (lsp-hierarchy-test--with-session
+      (let ((method (if (eq kind 'call)
+                        "textDocument/prepareCallHierarchy" "textDocument/prepareTypeHierarchy")))
+        (setq lsp-hierarchy-test--workspaces
+              (list (lsp-hierarchy-test--workspace
+                     'dynamic nil
+                     (list (make-lsp--registered-capability :id "test" :method method)))))
+        (with-current-buffer (lsp-hierarchy-test--show kind)
+          (should (equal (plist-get (plist-get (car lsp-hierarchy-test--sent) :body) :method)
+                         method))
+          (lsp-hierarchy-test--roots "foo")
+          (lsp-hierarchy-test--toggle "foo")
+          (should (= 2 (length lsp-hierarchy-test--sent))))))))
+
+(ert-deftest lsp-hierarchy-filters-workspaces-without-global-mutation ()
+  (lsp-hierarchy-test--with-session
+    (let ((requirements (copy-tree lsp-method-requirements)))
+      (setq lsp-hierarchy-test--workspaces
+            (append lsp-hierarchy-test--workspaces
+                    (list (lsp-hierarchy-test--workspace 'unsupported))))
+      (lsp-hierarchy-test--show 'type)
+      (should (= 1 (length lsp-hierarchy-test--sent)))
+      (should (eq (plist-get (car lsp-hierarchy-test--sent) :workspace)
+                  (car lsp-hierarchy-test--workspaces)))
+      (should (equal requirements lsp-method-requirements)))))
+
+(ert-deftest lsp-hierarchy-preserves-workspace-and-opaque-data ()
+  (lsp-hierarchy-test--with-session
+    (let* ((a (car lsp-hierarchy-test--workspaces))
+           (b (lsp-hierarchy-test--workspace
+               'server-b (lsp-make-server-capabilities :call-hierarchy-provider? t)))
+           (item-a (lsp-hierarchy-test--item "same" nil '("opaque" [1 2 3])))
+           (item-b (lsp-hierarchy-test--item "same" nil '("other"))))
+      (setq lsp-hierarchy-test--workspaces (list a b))
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (let ((requests (copy-sequence lsp-hierarchy-test--sent)))
+          (dolist (request requests)
+            (lsp-hierarchy-test--reply
+             request (vector (if (eq a (plist-get request :workspace)) item-a item-b)))))
+        (should (= (hash-table-count lsp-hierarchy--state-table) 2))
+        (let* ((nodes (hash-table-keys lsp-hierarchy--state-table))
+               (node-a (seq-find (lambda (node) (eq (plist-get node :workspace) a)) nodes))
+               (node-b (seq-find (lambda (node) (eq (plist-get node :workspace) b)) nodes)))
+          (should-not (eq (plist-get node-a :id) (plist-get node-b :id)))
+          (goto-char (text-property-any (point-min) (point-max) 'lsp-hierarchy-item node-a))
+          (lsp-hierarchy-toggle)
+          (let* ((request (car lsp-hierarchy-test--sent))
+                 (params (plist-get (plist-get request :body) :params)))
+            (should (eq (plist-get request :workspace) a))
+            (should (eq (plist-get params :item) item-a))))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
