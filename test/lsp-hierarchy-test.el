@@ -562,5 +562,23 @@
         (kill-buffer visited))
       (delete-file file))))
 
+(ert-deftest lsp-hierarchy-empty-node-becomes-a-leaf ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "empty" "next")
+      (lsp-hierarchy-test--toggle "empty")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
+      (font-lock-ensure)
+      (let* ((node (lsp-hierarchy-test--node "empty"))
+             (pos (lsp-hierarchy-test--node-position node))
+             (requests (length lsp-hierarchy-test--sent)))
+        (should (equal (get-text-property pos 'display) " "))
+        (goto-char pos)
+        (lsp-hierarchy-smart-tab)
+        (should (eq (lsp-hierarchy--get-prop 'lsp-hierarchy-item)
+                    (lsp-hierarchy-test--node "next")))
+        (lsp-hierarchy-test--toggle "empty")
+        (should (= requests (length lsp-hierarchy-test--sent)))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

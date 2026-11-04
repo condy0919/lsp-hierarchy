@@ -259,7 +259,6 @@ LSP kind abbreviations, the symbol label, and any extra details."
          (label (lsp-hierarchy--node-label item))
          (kind (lsp-hierarchy--node-kind item))
          (detail (lsp-hierarchy--node-detail item))
-         (cfn (and item (lsp-hierarchy--node-children-fn item)))
          (beg (point)))
     (insert (make-string (* indent 2) ?\s))
 
@@ -271,7 +270,7 @@ LSP kind abbreviations, the symbol label, and any extra details."
                                (lsp-hierarchy--node-workspace item)))))
 
     (when (eq type 'symbol)
-      (if (or cfn (hierarchy-children hierarchy (lsp-hierarchy--node-id item)))
+      (if (lsp-hierarchy--expandable-p item hierarchy)
           (insert (propertize "@" 'lsp-hierarchy-icon-marker t) " ")
         (insert "  "))
       (when-let* ((abbrev (lsp-hierarchy--kind-abbrev kind)))
@@ -329,17 +328,27 @@ LSP kind abbreviations, the symbol label, and any extra details."
                 (setq hidden-depth depth)))
             (forward-line 1)))))))
 
+(defun lsp-hierarchy--expandable-p (node hierarchy)
+  "Return non-nil if NODE has children or has not yet resolved them.
+HIERARCHY contains the already loaded relationships.  An empty successful
+response is a leaf, whereas an error remains retryable."
+  (and node
+       (eq (lsp-hierarchy--node-type node) 'symbol)
+       (or (and (not (eq (lsp-hierarchy--node-load-state node) 'loaded))
+                (lsp-hierarchy--node-children-fn node))
+           (lsp-hierarchy--node-children node)
+           (hierarchy-children hierarchy (lsp-hierarchy--node-id node)))))
+
 (defun lsp-hierarchy-toggle ()
   "Toggle node at point, loading children if necessary."
   (interactive)
   (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
          (h (lsp-hierarchy--get-prop 'lsp-hierarchy-tree))
          (indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent))
-         (type (and item (lsp-hierarchy--node-type item)))
          (cfn (and item (lsp-hierarchy--node-children-fn item))))
     (unless item
       (user-error "No node here"))
-    (if (eq type 'code)
+    (if (not (lsp-hierarchy--expandable-p item h))
         (forward-line 1)
       (cond
        ((or (eq (lsp-hierarchy--node-load-state item) 'loaded)
@@ -424,7 +433,8 @@ LSP kind abbreviations, the symbol label, and any extra details."
                    (setf (lsp-hierarchy--node-load-state item) 'loaded)
                    (goto-char origin)
                    (lsp-hierarchy--set-subtree-visibility
-                    (if (lsp-hierarchy--node-expanded item) 'show 'hide)))
+                    (if (lsp-hierarchy--node-expanded item) 'show 'hide))
+                   (font-lock-flush (line-beginning-position) (line-end-position)))
                  ;; Keep a finite depth budget with this request.  Point may
                  ;; have moved, and the user may have folded an ancestor.
                  (unwind-protect
@@ -456,9 +466,8 @@ LSP kind abbreviations, the symbol label, and any extra details."
   "Smart TAB command for `lsp-hierarchy-mode'."
   (interactive)
   (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
-         (h (lsp-hierarchy--get-prop 'lsp-hierarchy-tree))
-         (cfn (and item (lsp-hierarchy--node-children-fn item))))
-    (if (and item (or cfn (hierarchy-children h (lsp-hierarchy--node-id item))))
+         (h (lsp-hierarchy--get-prop 'lsp-hierarchy-tree)))
+    (if (lsp-hierarchy--expandable-p item h)
         (lsp-hierarchy-toggle)
       (outline-next-heading))))
 
@@ -489,9 +498,8 @@ LSP kind abbreviations, the symbol label, and any extra details."
 (defun lsp-hierarchy--get-icon-properties (start)
   "Return font-lock properties (face and display) for icon at START."
   (let* ((item (get-text-property start 'lsp-hierarchy-item))
-         (h (get-text-property start 'lsp-hierarchy-tree))
-         (cfn (and item (lsp-hierarchy--node-children-fn item))))
-    (if (and item (or cfn (hierarchy-children h (lsp-hierarchy--node-id item))))
+         (h (get-text-property start 'lsp-hierarchy-tree)))
+    (if (lsp-hierarchy--expandable-p item h)
         (let ((icon (if (lsp-hierarchy--node-expanded item)
                         lsp-hierarchy-icon-open
                       lsp-hierarchy-icon-close)))
