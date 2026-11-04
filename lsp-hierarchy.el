@@ -53,6 +53,14 @@ execution counts."
   :type 'boolean
   :group 'lsp-hierarchy)
 
+(defcustom lsp-hierarchy-show-location nil
+  "Show a source path and line number beside each symbol.
+Use a workspace-relative path for ordinary file URIs under a known local
+workspace root.  Otherwise show the full URI.  This only formats existing
+node data; it never reads source files or invokes URI handlers."
+  :type 'boolean
+  :group 'lsp-hierarchy)
+
 (defcustom lsp-hierarchy-icon-close "▶"
   "Text icon used for closed sections."
   :type 'string
@@ -293,17 +301,35 @@ Keyboard bindings fall through to `lsp-hierarchy-mode-map', including TAB.")
   "Return TEXT with line breaks and tabs replaced for a single display row."
   (replace-regexp-in-string "[\t\n\r]+" " " text))
 
+(defun lsp-hierarchy--location-text (node &optional relative)
+  "Return NODE's URI and line, using a relative path when RELATIVE permits."
+  (when-let* ((uri (lsp-hierarchy--node-uri node)))
+    (let* ((range (lsp-hierarchy--node-range node))
+           (start (and range (lsp-get range :start)))
+           (workspace (lsp-hierarchy--node-workspace node))
+           (root (and relative workspace (lsp--workspace-root workspace)))
+           ;; Compare URI prefixes lexically.  Calling URI handlers here can
+           ;; materialize virtual files; remote paths also keep their URI.
+           (prefix (and (stringp root) (string-prefix-p "/" root)
+                        (not (string-match-p "\\`/[^/]+:" root))
+                        (concat "file://"
+                                (url-hexify-string
+                                 (concat (string-remove-suffix "/" root) "/")
+                                 lsp--url-path-allowed-chars))))
+           (label (if (and prefix (string-prefix-p prefix uri))
+                      (decode-coding-string
+                       (url-unhex-string (substring uri (length prefix))) 'utf-8)
+                    uri)))
+      (concat (lsp-hierarchy--single-line label)
+              (when start
+                ;; Protocol columns may count encoding units rather than
+                ;; display characters; converting them would need source.
+                (format ":%d" (1+ (lsp-get start :line))))))))
+
 (defun lsp-hierarchy--location-help (node action)
-  "Return ACTION with NODE's source location for its hover help.
-Show the URI and a line number starting at one, without reading files."
-  (if-let* ((uri (lsp-hierarchy--node-uri node)))
-      (let* ((range (lsp-hierarchy--node-range node))
-             (start (and range (lsp-get range :start))))
-        (concat action "\n" (lsp-hierarchy--single-line uri)
-                (when start
-                  ;; Protocol columns may count encoding units rather than
-                  ;; display characters; converting them would need source.
-                  (format ":%d" (1+ (lsp-get start :line))))))
+  "Return ACTION with NODE's full source location for its hover help."
+  (if-let* ((location (lsp-hierarchy--location-text node)))
+      (concat action "\n" location)
     action))
 
 (defun lsp-hierarchy--display-detail (node)
@@ -363,7 +389,14 @@ Show the URI and a line number starting at one, without reading files."
                                'face 'lsp-hierarchy-detail-face
                                'help-echo "Known source call sites on this hierarchy edge"))))
        (when-let* ((annotation (lsp-hierarchy--node-annotation item)))
-         (insert (propertize annotation 'face 'lsp-hierarchy-detail-face)))))
+         (insert (propertize annotation 'face 'lsp-hierarchy-detail-face)))
+       (when-let* ((location (and lsp-hierarchy-show-location
+                                 (lsp-hierarchy--location-text item t))))
+         (insert (apply #'propertize (concat " — " location)
+                        'face 'lsp-hierarchy-detail-face
+                        (lsp-hierarchy--action-properties
+                         #'lsp-hierarchy-goto
+                         (lsp-hierarchy--location-help item "mouse-1, RET: Visit this symbol")))))))
     (insert "\n")
     (add-text-properties beg (point)
                          (list 'lsp-hierarchy-item item
@@ -546,6 +579,7 @@ can insert rows anywhere above the user's current position."
          (close-icon lsp-hierarchy-icon-close)
          (open-icon lsp-hierarchy-icon-open)
          (detailed lsp-hierarchy-detailed-outline)
+         (show-location lsp-hierarchy-show-location)
          (sort-order lsp-hierarchy-sort-order)
          (lsp-hierarchy--filter-matches
           (lsp-hierarchy--matching-nodes (lsp-hierarchy--view-roots view)))
@@ -560,6 +594,7 @@ can insert rows anywhere above the user's current position."
                              lsp-hierarchy-icon-close close-icon
                              lsp-hierarchy-icon-open open-icon
                              lsp-hierarchy-detailed-outline detailed
+                             lsp-hierarchy-show-location show-location
                              lsp-hierarchy-sort-order sort-order)
                  (pcase (lsp-hierarchy--view-status view)
                    ('loading (insert "Loading hierarchy...\n"))

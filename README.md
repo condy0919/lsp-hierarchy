@@ -96,10 +96,15 @@ An incoming-call view after expanding a caller:
 ;; Include signatures and known call-site counts in symbol labels
 (setq lsp-hierarchy-detailed-outline t)
 
+;; Show source paths and line numbers beside symbols (off by default)
+(setq lsp-hierarchy-show-location t)
+
 ;; Custom icons
 (setq lsp-hierarchy-icon-open "▼")
 (setq lsp-hierarchy-icon-close "▶")
 ```
+
+`lsp-hierarchy-show-location` adds a workspace-relative path and line number for ordinary file URIs within a known local workspace. Other locations retain their full URI, including remote and custom URI schemes. This distinguishes equal basenames in different directories without opening files. Hover help always retains the full URI.
 
 Call-site text is read only for visible rows. Open buffers supply their current contents, including unsaved edits; other files use view-local snapshots refreshed when the file changes.
 

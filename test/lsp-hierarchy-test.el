@@ -2741,5 +2741,72 @@
           (should (eq (get-text-property (1- (point)) 'face) (cdr entry))))))))
 
 
+(ert-deftest lsp-hierarchy-inline-locations-disambiguate-without-source-reads ()
+  (lsp-hierarchy-test--with-session
+    (setf (lsp--workspace-root (car lsp-hierarchy-test--workspaces)) "/project")
+    (let ((lsp-hierarchy-show-location nil))
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (cl-letf (((symbol-function 'lsp--uri-to-path)
+                   (lambda (&rest _) (ert-fail "Location labels must not invoke URI handlers")))
+                  ((symbol-function 'lsp-hierarchy--source-snapshot)
+                   (lambda (&rest _) (ert-fail "Location labels must not open source"))))
+          (lsp-hierarchy-test--reply
+           (car lsp-hierarchy-test--sent)
+           (vector (lsp-hierarchy-test--item "same" "file:///project/a/main.c")
+                   (lsp-hierarchy-test--item "same" "file:///project/b/main.c")))
+          (should-not (string-match-p "main.c" (buffer-string)))
+          ;; A local preference must reach the renderer's temporary buffer,
+          ;; independently of whether signatures are displayed.
+          (setq-local lsp-hierarchy-show-location t
+                      lsp-hierarchy-detailed-outline nil)
+          (lsp-hierarchy--render)
+          (should (string-match-p "same — a/main.c:1" (buffer-string)))
+          (should (string-match-p "same — b/main.c:1" (buffer-string)))
+          (goto-char (point-min))
+          (search-forward "a/main.c")
+          (should (eq (get-text-property (1- (point)) 'face) 'lsp-hierarchy-detail-face))
+          (should (eq (get-text-property (1- (point)) 'lsp-hierarchy-action) #'lsp-hierarchy-goto))
+          (should (equal (get-text-property (1- (point)) 'help-echo)
+                         "mouse-1, RET: Visit this symbol\nfile:///project/a/main.c:1"))
+          (should (= 2 (count-lines (point-min) (point-max))))
+          (should (= 1 (length lsp-hierarchy-test--sent)))
+          (setq-local lsp-hierarchy-show-location nil)
+          (lsp-hierarchy--render)
+          (should-not (string-match-p "main.c" (buffer-string))))))))
+
+(ert-deftest lsp-hierarchy-inline-location-fallbacks-stay-single-line ()
+  (dolist (entry '(("/project" "file:///project-other/main.c" "file:///project-other/main.c:1")
+                   ("/project" "file://remote/project/main.c" "file://remote/project/main.c:1")
+                   ("/ssh:remote:/project" "file:///project/main.c" "file:///project/main.c:1")
+                   (nil "custom://项目/目录\nname.c" "custom://项目/目录 name.c:1")
+                   ("/项目" "file:///%E9%A1%B9%E7%9B%AE/a%20b/main.c" "a b/main.c:1")))
+    (with-temp-buffer
+      (lsp-hierarchy-mode)
+      (setq-local lsp-hierarchy-show-location t)
+      (let* ((workspace (lsp-hierarchy-test--workspace 'server))
+             (item (lsp-hierarchy-test--item "same" (nth 1 entry)))
+             (inhibit-read-only t))
+        (setf (lsp--workspace-root workspace) (car entry))
+        (cl-letf (((symbol-function 'lsp--uri-to-path)
+                   (lambda (&rest _) (ert-fail "Fallback must not resolve URIs")))
+                  ((symbol-function 'file-attributes)
+                   (lambda (&rest _) (ert-fail "Fallback must not inspect files"))))
+          (lsp-hierarchy--insert-node (lsp-hierarchy--symbol-node item workspace) 0))
+        (should (string-match-p (regexp-quote (concat " — " (nth 2 entry))) (buffer-string)))
+        (should (= 1 (count-lines (point-min) (point-max))))
+        (should (equal (lsp-get item :uri) (nth 1 entry)))))))
+
+(ert-deftest lsp-hierarchy-inline-location-allows-missing-locations ()
+  (with-temp-buffer
+    (lsp-hierarchy-mode)
+    (setq-local lsp-hierarchy-show-location t)
+    (let ((inhibit-read-only t))
+      (lsp-hierarchy--insert-node (lsp-hierarchy--make-node :type 'symbol :name "unlocated") 0)
+      (lsp-hierarchy--insert-node
+       (lsp-hierarchy--make-node :type 'symbol :name "uri-only" :uri "custom://symbol") 0))
+    (should-not (string-match-p "unlocated —" (buffer-string)))
+    (should (string-match-p "uri-only — custom://symbol" (buffer-string)))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
