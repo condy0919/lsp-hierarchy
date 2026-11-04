@@ -57,6 +57,7 @@ You can bind the primary commands to your preferred keys or add them to the `lsp
 | `u` | Move to the parent node. |
 | `M-n` / `M-p` | Move between visible siblings, skipping descendants. |
 | Left arrow | Fold the current branch, or move to its parent if already closed. |
+| `r` | Start a fresh hierarchy at the selected symbol. |
 | `d` | Switch between callers/callees or subtypes/supertypes at the original query position. |
 | `g` | Refresh while restoring matching branches and the selected location. |
 | `C-u g` | Refresh with the initial expansion depth, discarding saved tree state. |
@@ -73,6 +74,8 @@ Nodes can be folded while loading. Known call sites appear immediately on expans
 Refresh repeats the query at its original source marker and in the same direction. The marker follows edits; moving point elsewhere in the source buffer does not change the query. Refresh cancels pending requests and releases source snapshots, then restores state on matching paths using fresh server results. Matching uses the workspace, symbol identity and exact source range within each parent path; symbols moved or removed by edits may not retain their state. User interaction stops pending cursor restoration, so late replies do not take point away. `M-x revert-buffer` also refreshes; `C-u g` starts from `lsp-hierarchy-expand-depth`. Closing or replacing the view releases its requests and snapshots.
 
 Sorting and filtering operate on already loaded nodes without requesting more hierarchy data. Sorting keeps equal keys in server order and leaves call sites in their original order. Filtering reveals paths to matching loaded symbols even beneath folded ancestors; it keeps the stored expansion choices, which take effect again when the filter is cleared. Open branches retain their loading and error rows so refresh progress and retry actions remain accessible. Ordinary incremental search still searches only the displayed rows.
+
+`r` prepares a fresh hierarchy at the selected symbol. Its source buffer must be managed by the server that returned that symbol; otherwise the view is retained and the command asks you to activate that server in the source buffer. After re-rooting, refresh and direction changes use the new source marker and stay with the same server.
 
 ### Example
 

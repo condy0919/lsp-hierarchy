@@ -165,11 +165,17 @@
   - **原地切换方向**（Incoming $\leftrightarrow$ Outgoing，Subtypes $\leftrightarrow$ Supertypes）；
   - **以当前光标下的节点为新 Root 重新展开层次树**（无需先 `RET` 跳回源文件再执行 `M-x lsp-hierarchy-show-*`）。
 
-**核查与处理（功能缺口，方向切换已补充）**
+**核查与处理（功能缺口，已补充）**
 
 - 这两项此前均未提供，属于功能建议，不是既有命令的错误。
 - 新增 `lsp-hierarchy-switch-direction`（`d`），在原始查询 marker 处重新 prepare 相反方向，取消旧请求并丢弃不适用于新方向的展开路径；保留排序/过滤等显示偏好及窗口焦点。
-- 验证：覆盖 call/type 双向切换、旧响应隔离、原始位置与源 buffer narrowing、后台窗口不抢焦点；117 项 ERT 全部通过。重设根节点作为下一独立提交处理。
+- 验证：覆盖 call/type 双向切换、旧响应隔离、原始位置与源 buffer narrowing、后台窗口不抢焦点；117 项 ERT 全部通过。
+
+**重设根节点（独立提交）**
+
+- 新增 `lsp-hierarchy-reroot`（`r`），在当前符号所属源码位置重新 prepare，使用新返回的 opaque data，并把后续刷新/方向切换限制到原服务器。URI 映射及位置编码均采用该节点的工作区。
+- 目标源码 buffer 必须已关联该服务器；未关联时给出启用 LSP 后重试的提示，保留现有视图。这里没有复制 lsp-mode 的文档打开和服务器生命周期逻辑。
+- 验证：覆盖跨 URI、多服务器与不同编码、源文件编辑后的 marker、旧请求取消、工作区断开及未管理源码、窗口焦点；119 项 ERT 全部通过。
 
 ### 4. 支持 LSP 3.16+ `SymbolTag`（如 Deprecated 符号样式）与键盘用户的同名符号消歧
 - `CallHierarchyItem` / `TypeHierarchyItem` 支持 `:tags`（如 `SymbolTag.Deprecated = 1`），可为废弃符号添加删除线属性。

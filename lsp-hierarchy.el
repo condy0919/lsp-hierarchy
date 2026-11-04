@@ -133,6 +133,8 @@ its identity; view roots and parent/child links own the model."
   "Resources and query context owned by one hierarchy buffer."
   ;; origin follows source edits and is detached when this view is disposed.
   source origin kind direction roots (status 'ready) error
+  ;; Re-rooted queries stay with the server owning the selected symbol.
+  workspace
   ;; Keep pending focus separate: a user command cancels cursor restoration,
   ;; while expansion can continue asynchronously until the saved path loads.
   restore restore-focus restore-window-focus
@@ -932,6 +934,7 @@ Keep point unchanged when there is no later symbol."
     (define-key map (kbd "s") #'lsp-hierarchy-cycle-sort)
     (define-key map (kbd "/") #'lsp-hierarchy-filter)
     (define-key map (kbd "d") #'lsp-hierarchy-switch-direction)
+    (define-key map (kbd "r") #'lsp-hierarchy-reroot)
     (define-key map (kbd "g") #'lsp-hierarchy-refresh)
     (define-key map (kbd "?") #'describe-mode)
     map)
@@ -1008,6 +1011,16 @@ with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
         (setq remaining (- remaining units))
         (forward-char 1)))
     (point)))
+
+(defun lsp-hierarchy--point-to-position (workspace)
+  "Return point as an LSP position in WORKSPACE's negotiated encoding.
+The caller must widen the source buffer before converting."
+  (let* ((prefix (buffer-substring-no-properties (line-beginning-position) (point)))
+         (column (pcase (lsp-hierarchy--position-encoding workspace)
+                   ("utf-8" (string-bytes (encode-coding-string prefix 'utf-8)))
+                   ("utf-32" (length prefix))
+                   (_ (cl-loop for char across prefix sum (if (> char #xffff) 2 1))))))
+    (list :line (1- (line-number-at-pos)) :character column)))
 
 (defun lsp-hierarchy--source-snapshot (filename)
   "Return a current buffer for FILENAME, reusing owned snapshots."
@@ -1154,18 +1167,28 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
         (lsp-hierarchy--view-error lsp-hierarchy--view) err)
   (lsp-hierarchy--render))
 
-(defun lsp-hierarchy--prepare (view-type direction &optional target restore)
+(defun lsp-hierarchy--prepare (view-type direction &optional target restore workspace)
   "Prepare VIEW-TYPE in DIRECTION, replacing TARGET or the default view.
-RESTORE is an optional snapshot of expansion and point before refresh."
+RESTORE is an optional snapshot of expansion and point before refresh.
+WORKSPACE, when non-nil, restricts the query to that attached server."
   (let* ((source (current-buffer))
          (method (if (eq view-type 'call)
                      "textDocument/prepareCallHierarchy" "textDocument/prepareTypeHierarchy"))
          (lsp-method-requirements
           (append lsp-method-requirements lsp-hierarchy--method-requirements))
-         (workspaces (or (lsp--find-workspaces-for method)
-                         (user-error "%s hierarchy is not supported by the current servers"
-                                     (capitalize (symbol-name view-type)))))
-         (params (lsp--text-document-position-params))
+         (workspaces
+          (let* ((lsp--cur-workspace nil)
+                 (supported (lsp--find-workspaces-for method)))
+            (if workspace
+                (if (memq workspace supported) (list workspace)
+                  (user-error "The symbol's language server is not attached or no longer supports this hierarchy"))
+              (or supported
+                  (user-error "%s hierarchy is not supported by the current servers"
+                              (capitalize (symbol-name view-type)))))))
+         (params (if workspace
+                     (with-lsp-workspace workspace
+                       (lsp--text-document-position-params nil (lsp-hierarchy--point-to-position workspace)))
+                   (lsp--text-document-position-params)))
          (name (if (eq view-type 'call) "*LSP Call Hierarchy*" "*LSP Type Hierarchy*"))
          (view (or target (get-buffer-create name)))
          (origin (copy-marker (point))))
@@ -1181,6 +1204,7 @@ RESTORE is an optional snapshot of expansion and point before refresh."
             (lsp-hierarchy--view-origin lsp-hierarchy--view) origin
             (lsp-hierarchy--view-kind lsp-hierarchy--view) view-type
             (lsp-hierarchy--view-direction lsp-hierarchy--view) direction
+            (lsp-hierarchy--view-workspace lsp-hierarchy--view) workspace
             (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading
             (lsp-hierarchy--view-restore lsp-hierarchy--view) restore
             (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) (plist-get restore :focus)
@@ -1387,6 +1411,43 @@ still loading the missing path, or prepare has failed and remains retryable."
                        (and (cdr result) entry)))))
                (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view)))))
 
+(defun lsp-hierarchy-reroot ()
+  "Start this hierarchy afresh at the symbol at point.
+The source buffer must be managed by the symbol's owning language server.
+If necessary, activate LSP in that source buffer and retry.  Subsequent
+refreshes and direction changes stay with that server and source marker."
+  (interactive)
+  (let* ((node (lsp-hierarchy--location-node-at-point))
+         (workspace (lsp-hierarchy--node-workspace node))
+         (target (current-buffer))
+         (kind (lsp-hierarchy--view-kind lsp-hierarchy--view))
+         (direction (lsp-hierarchy--view-direction lsp-hierarchy--view)))
+    (unless (eq (lsp-hierarchy--node-type node) 'symbol)
+      (user-error "Re-root requires a symbol node"))
+    (unless workspace (user-error "No language server owns this symbol"))
+    (let ((source (find-file-noselect
+                   (with-lsp-workspace workspace
+                     (lsp--uri-to-path (lsp-hierarchy--node-uri node))))))
+      (save-selected-window
+        (with-current-buffer source
+          ;; Opening a file can run the user's LSP hooks.  Require an actual
+          ;; attachment; this UI must not invent workspace membership or
+          ;; duplicate lsp-mode's didOpen/lifecycle machinery.
+          (let ((lsp--cur-workspace nil))
+            (unless (memq workspace (lsp-workspaces))
+              (user-error "Activate LSP server %s in %s, then retry re-root"
+                          (lsp--client-server-id (lsp--workspace-client workspace))
+                          (buffer-name source))))
+          (save-restriction
+            (widen)
+            (save-excursion
+              (goto-char (lsp-hierarchy--position-to-point
+                          (lsp-get (lsp-hierarchy--node-range node) :start)
+                          (lsp-hierarchy--position-encoding workspace)))
+              ;; Re-prepare at the target location instead of reusing stale
+              ;; opaque item data.  All validation precedes view replacement.
+              (lsp-hierarchy--prepare kind direction target nil workspace))))))))
+
 (defun lsp-hierarchy-switch-direction ()
   "Switch between callers/callees or subtypes/supertypes at the same origin.
 Start a fresh tree for the new relationships while retaining this view's
@@ -1399,7 +1460,8 @@ sorting, filtering, and other display preferences."
          (previous (lsp-hierarchy--view-direction lsp-hierarchy--view))
          (direction (if (eq kind 'call) (not previous)
                       (if (eq previous 'supertypes) 'subtypes 'supertypes)))
-         (origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
+         (origin (lsp-hierarchy--view-origin lsp-hierarchy--view))
+         (workspace (lsp-hierarchy--view-workspace lsp-hierarchy--view)))
     (unless (and (markerp origin) (marker-buffer origin))
       (user-error "The hierarchy source buffer has been killed"))
     (save-selected-window
@@ -1410,7 +1472,7 @@ sorting, filtering, and other display preferences."
             (goto-char origin)
             ;; Opposite relationships have different paths: expansion and
             ;; pending focus from the previous direction must not be restored.
-            (lsp-hierarchy--prepare kind direction target)))))))
+            (lsp-hierarchy--prepare kind direction target nil workspace)))))))
 
 (defun lsp-hierarchy-refresh (&optional reset)
   "Refresh this view at its original source position.
@@ -1425,6 +1487,7 @@ start over using `lsp-hierarchy-expand-depth' instead of preserving state."
         (kind (lsp-hierarchy--view-kind lsp-hierarchy--view))
         (direction (lsp-hierarchy--view-direction lsp-hierarchy--view))
         (origin (lsp-hierarchy--view-origin lsp-hierarchy--view))
+        (workspace (lsp-hierarchy--view-workspace lsp-hierarchy--view))
         (restore (unless reset (lsp-hierarchy--save-refresh-state))))
     (unless (and (markerp origin) (marker-buffer origin))
       (user-error "The hierarchy source buffer has been killed"))
@@ -1433,7 +1496,7 @@ start over using `lsp-hierarchy-expand-depth' instead of preserving state."
         (widen)
         (save-excursion
           (goto-char origin)
-          (lsp-hierarchy--prepare kind direction target restore))))))
+          (lsp-hierarchy--prepare kind direction target restore workspace))))))
 
 (defun lsp-hierarchy--revert (_ignore-auto _noconfirm)
   "Refresh the current hierarchy through `revert-buffer'."
