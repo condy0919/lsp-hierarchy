@@ -286,33 +286,26 @@ LSP kind abbreviations, the symbol label, and any extra details."
 ;;; Core: Interaction Logic
 
 (defun lsp-hierarchy--set-subtree-visibility (flag)
-  "Set visibility of the current node's subtree based on FLAG.
-FLAG can be either \='hide or \='show."
+  "Apply FLAG (hide or show) while preserving descendant expansion states."
   (let ((inhibit-read-only t)
-        (current-indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent)))
-    (when current-indent
+        (indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent)))
+    (when indent
       (save-excursion
-        (forward-line 1)
-        (let ((keep-going t))
-          (while (and keep-going (not (eobp)))
-            (let ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
-                  (indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent)))
-              (if (and indent (> indent current-indent))
-                  (progn
-                    (outline-flag-region (line-beginning-position)
-                                         (1+ (line-end-position))
-                                         (if (eq flag 'hide) t nil))
-                    (when (and (eq flag 'show)
-                               item
-                               (eq (gethash item lsp-hierarchy--state-table) 'close))
-                      (let ((sub-indent indent))
-                        (forward-line 1)
-                        (while (let ((next-indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent)))
-                                 (and next-indent (> next-indent sub-indent) (not (eobp))))
-                          (forward-line 1))
-                        (forward-line -1)))
-                    (forward-line 1))
-                (setq keep-going nil)))))))))
+        ;; A response may arrive after an ancestor was folded.  New rows
+        ;; inherit that hidden state even if this node is still expanded.
+        (let ((hidden-depth (when (or (eq flag 'hide) (invisible-p (point))) indent)))
+          (forward-line 1)
+          (while (and (not (eobp))
+                      (> (or (lsp-hierarchy--get-prop 'lsp-hierarchy-indent) -1) indent))
+            (let ((depth (lsp-hierarchy--get-prop 'lsp-hierarchy-indent))
+                  (child (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
+              (when (and hidden-depth (<= depth hidden-depth)) (setq hidden-depth nil))
+              (outline-flag-region (line-beginning-position) (line-beginning-position 2)
+                                   (and hidden-depth t))
+              (when (and (not hidden-depth) child
+                         (eq (gethash child lsp-hierarchy--state-table) 'close))
+                (setq hidden-depth depth)))
+            (forward-line 1)))))))
 
 (defun lsp-hierarchy-toggle ()
   "Toggle node at point, loading children if necessary."
@@ -327,10 +320,8 @@ FLAG can be either \='hide or \='show."
     (if (eq type 'code)
         (forward-line 1)
       (cond
-       ((gethash item lsp-hierarchy--loading-table)
-        (message "LSP: Loading children, please wait..."))
-
-       ((gethash item lsp-hierarchy--loaded-table)
+       ((or (gethash item lsp-hierarchy--loaded-table)
+            (gethash item lsp-hierarchy--loading-table))
         (let ((current-state (gethash item lsp-hierarchy--state-table)))
           (if (eq current-state 'open)
               (progn
@@ -361,7 +352,11 @@ FLAG can be either \='hide or \='show."
         (goto-char marker)
         (let ((beg (point)))
           (insert (make-string (* (1+ indent) 2) ?\s) "  Loading...\n")
-          (add-text-properties beg (point) '(lsp-hierarchy-loading t))
+          ;; Status rows take part in folding but are not symbol nodes.
+          (add-text-properties beg (point)
+                               (list 'lsp-hierarchy-loading t
+                                     'lsp-hierarchy-indent (1+ indent)
+                                     'lsp-hierarchy-item nil))
           ;; Responses can finish out of order.  Each request owns its row;
           ;; searching the buffer for the first loading marker is ambiguous.
           (setq placeholder (make-overlay beg (point)))
@@ -398,7 +393,8 @@ FLAG can be either \='hide or \='show."
                      (lsp-hierarchy--insert-node child (1+ indent) hierarchy))
                    (puthash item t lsp-hierarchy--loaded-table)
                    (goto-char origin)
-                   (lsp-hierarchy--set-subtree-visibility 'show))
+                   (lsp-hierarchy--set-subtree-visibility
+                    (if (eq (gethash item lsp-hierarchy--state-table) 'open) 'show 'hide)))
                  (finish))
              (error (fail err)))))
       ;; Send-time exceptions and asynchronous failures take the same path;
@@ -497,7 +493,7 @@ FLAG can be either \='hide or \='show."
   (setq-local outline-minor-mode-use-buttons nil)
   (setq-local outline-regexp lsp-hierarchy--outline-regexp)
   (setq-local outline-level (lambda () (1+ (/ (current-indentation) 2))))
-  (setq-local outline-minor-mode t)
+  (outline-minor-mode 1)
 
   (setq-local buffer-undo-list t)
   (setq-local buffer-read-only t)

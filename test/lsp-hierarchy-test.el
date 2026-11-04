@@ -309,5 +309,42 @@
             (should (< (string-match "child-alpha" (buffer-string))
                        (string-match "beta" (buffer-string))))))))))
 
+(defun lsp-hierarchy-test--node-position (node)
+  "Return the position of rendered NODE in the current view."
+  (text-property-any (point-min) (point-max) 'lsp-hierarchy-item node))
+
+(ert-deftest lsp-hierarchy-folding-survives-pending-descendants ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (vector (lsp-hierarchy-test--call "alpha")
+                                         (lsp-hierarchy-test--call "beta")))
+      (lsp-hierarchy-test--toggle "alpha")
+      (let ((pending (car lsp-hierarchy-test--sent)))
+        (lsp-hierarchy-test--toggle "root")
+        (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "beta"))))
+        (lsp-hierarchy-test--reply pending (vector (lsp-hierarchy-test--call "grandchild")))
+        (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild"))))
+        (lsp-hierarchy-test--toggle "root")
+        (should-not (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild"))))
+        (lsp-hierarchy-test--toggle "alpha")
+        (lsp-hierarchy-test--toggle "root")
+        (lsp-hierarchy-test--toggle "root")
+        (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild"))))))))
+
+(ert-deftest lsp-hierarchy-can-fold-while-node-is-loading ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (vector (lsp-hierarchy-test--call "child")))
+      (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child"))))
+      (lsp-hierarchy-test--toggle "root")
+      (should-not (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child")))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
