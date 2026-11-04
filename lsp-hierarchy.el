@@ -95,12 +95,19 @@ Zero leaves roots closed; one loads their immediate children."
 Each occurrence has independent expansion and request state, even when
 several paths lead to the same protocol item."
   (id (make-symbol "lsp-hierarchy-node"))
-  workspace lsp-item type name kind detail annotation uri range parent children call-sites
+  ;; Protocol items belong to their server, including any opaque `data'.
+  workspace lsp-item type name kind detail annotation uri range
+  ;; call-sites describe the incoming edge, not the shared symbol itself.
+  ;; children contains the complete loaded rows, including those call sites.
+  parent children call-sites
   ;; Expansion is a user choice; loading can finish while a node is folded.
+  ;; load-state is one of unloaded/loading/loaded/error.  A loaded empty
+  ;; children list is a known leaf; an error remains retryable.
   expanded (load-state 'unloaded) request error)
 
 (cl-defstruct (lsp-hierarchy--view (:constructor lsp-hierarchy--make-view))
   "Resources and query context owned by one hierarchy buffer."
+  ;; origin follows source edits and is detached when this view is disposed.
   source origin kind direction roots (status 'ready) error
   (generation (make-symbol "lsp-hierarchy-view"))
   (requests (make-hash-table :test 'eq))
@@ -112,6 +119,8 @@ several paths lead to the same protocol item."
 
 (defun lsp-hierarchy--cancel-request (token)
   "Cancel TOKEN and release handlers even when sending cancellation fails."
+  ;; Keep this compatibility boundary until lsp-mode's cancellation cleanup
+  ;; is unconditional: UI code must not manage protocol handler tables.
   (let ((lsp--cur-workspace nil)
         (request (gethash token lsp--cancelable-requests)))
     (unwind-protect
