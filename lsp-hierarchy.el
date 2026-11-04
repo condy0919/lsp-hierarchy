@@ -47,7 +47,9 @@ Zero leaves roots closed; one loads their immediate children."
   :group 'lsp-hierarchy)
 
 (defcustom lsp-hierarchy-detailed-outline t
-  "Include signatures in symbol labels."
+  "Include signatures and known call-site counts in symbol labels.
+Site counts describe source locations along the hierarchy edge, not
+execution counts."
   :type 'boolean
   :group 'lsp-hierarchy)
 
@@ -257,6 +259,19 @@ Keyboard bindings fall through to `lsp-hierarchy-mode-map', including TAB.")
   "Return TEXT with line breaks and tabs replaced for a single display row."
   (replace-regexp-in-string "[\t\n\r]+" " " text))
 
+(defun lsp-hierarchy--location-help (node action)
+  "Return ACTION with NODE's source location for its hover help.
+Show the URI and a line number starting at one, without reading files."
+  (if-let* ((uri (lsp-hierarchy--node-uri node)))
+      (let* ((range (lsp-hierarchy--node-range node))
+             (start (and range (lsp-get range :start))))
+        (concat action "\n" (lsp-hierarchy--single-line uri)
+                (when start
+                  ;; Protocol columns may count encoding units rather than
+                  ;; display characters; converting them would need source.
+                  (format ":%d" (1+ (lsp-get start :line))))))
+    action))
+
 (defun lsp-hierarchy--insert-node (item indent)
   "Insert ITEM at INDENT using its structured name and location."
   (let ((beg (point)))
@@ -271,7 +286,8 @@ Keyboard bindings fall through to `lsp-hierarchy-mode-map', including TAB.")
                        (lsp-hierarchy--node-range item)
                        (lsp-hierarchy--node-workspace item))
                       (lsp-hierarchy--action-properties
-                       #'lsp-hierarchy-goto "mouse-1, RET: Visit this call site"))))
+                       #'lsp-hierarchy-goto
+                       (lsp-hierarchy--location-help item "mouse-1, RET: Visit this call site")))))
       ('symbol
        (insert (apply #'propertize "@" 'lsp-hierarchy-icon-marker t
                       (lsp-hierarchy--icon-properties item)) " ")
@@ -285,12 +301,21 @@ Keyboard bindings fall through to `lsp-hierarchy-mode-map', including TAB.")
                       (lsp-hierarchy--single-line (lsp-hierarchy--node-name item))
                       'face 'lsp-hierarchy-node-face
                       (lsp-hierarchy--action-properties
-                       #'lsp-hierarchy-goto "mouse-1, RET: Visit this symbol")))
+                       #'lsp-hierarchy-goto
+                       (lsp-hierarchy--location-help item "mouse-1, RET: Visit this symbol"))))
        (when-let* ((detail (and lsp-hierarchy-detailed-outline
                                (lsp-hierarchy--node-detail item)))
                    ((not (string-empty-p detail))))
          (insert (propertize (concat " " (lsp-hierarchy--single-line (string-trim-left detail)))
                              'face 'lsp-hierarchy-detail-face)))
+       ;; These locations belong to this occurrence's incoming edge.  The
+       ;; same symbol elsewhere in the tree may have a different site count.
+       (when-let* ((sites (and lsp-hierarchy-detailed-outline
+                              (lsp-hierarchy--node-call-sites item))))
+         (let ((count (length sites)))
+           (insert (propertize (format " (%d site%s)" count (if (= count 1) "" "s"))
+                               'face 'lsp-hierarchy-detail-face
+                               'help-echo "Known source call sites on this hierarchy edge"))))
        (when-let* ((annotation (lsp-hierarchy--node-annotation item)))
          (insert (propertize annotation 'face 'lsp-hierarchy-detail-face)))))
     (insert "\n")

@@ -1163,5 +1163,82 @@
       (should-not (get-text-property (point) 'lsp-hierarchy-action))
       (should-not (get-text-property (point) 'help-echo)))))
 
+(defun lsp-hierarchy-test--location-help (node)
+  "Return the location hover text on NODE's name or source code."
+  (save-excursion
+    (lsp-hierarchy--goto-node node)
+    (let ((position (text-property-any (point) (line-end-position)
+                                       'lsp-hierarchy-action #'lsp-hierarchy-goto)))
+      (get-text-property position 'help-echo))))
+
+(ert-deftest lsp-hierarchy-location-help-distinguishes-same-named-roots ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (cl-letf (((symbol-function 'lsp--uri-to-path)
+                 (lambda (&rest _) (ert-fail "Rendering should not resolve or open URIs"))))
+        (lsp-hierarchy-test--reply
+         (car lsp-hierarchy-test--sent)
+         (vector (lsp-hierarchy-test--item "同名😀\n函数" "file:///项目/一.c")
+                 (lsp-hierarchy-test--item "同名😀\n函数" "virtual:///项目/二\n文件.c")))
+        (let ((roots (lsp-hierarchy--view-roots lsp-hierarchy--view)))
+          (should (equal (lsp-hierarchy-test--location-help (car roots))
+                         "mouse-1, RET: Visit this symbol\nfile:///项目/一.c:1"))
+          (should (equal (lsp-hierarchy-test--location-help (cadr roots))
+                         "mouse-1, RET: Visit this symbol\nvirtual:///项目/二 文件.c:1")))
+        (should (= 2 (count-lines (point-min) (point-max))))
+        (should (= 2 (how-many "同名😀 函数" (point-min) (point-max))))
+        (should-not (string-match-p "site" (buffer-string)))
+        (should (= 1 (length lsp-hierarchy-test--sent)))))))
+
+(ert-deftest lsp-hierarchy-closed-node-site-counts-need-no-source-reads ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (cl-letf (((symbol-function 'lsp-hierarchy--extract-line)
+                 (lambda (&rest _) (ert-fail "Closed nodes must not read call-site source")))
+                ((symbol-function 'lsp-hierarchy--source-snapshot)
+                 (lambda (&rest _) (ert-fail "Metadata must not open source snapshots"))))
+        (lsp-hierarchy-test--reply
+         (car lsp-hierarchy-test--sent)
+         (vector (lsp-hierarchy-test--call "once" nil
+                                          (vector (lsp-hierarchy-test--range 0 0 3)))
+                 (lsp-hierarchy-test--call "twice" nil
+                                          (vector (lsp-hierarchy-test--range 0 0 3)
+                                                  (lsp-hierarchy-test--range 1 0 3)))
+                 (lsp-hierarchy-test--call "unknown")))
+        (should (string-match-p "once (1 site)" (buffer-string)))
+        (should (string-match-p "twice (2 sites)" (buffer-string)))
+        (should-not (string-match-p "0 sites" (buffer-string)))
+        (setq-local lsp-hierarchy-detailed-outline nil)
+        (lsp-hierarchy--render)
+        (should-not (string-match-p "sites?" (buffer-string)))
+        (should (string-match-p "file:///tmp/lsp-hierarchy-test.c:1"
+                                (lsp-hierarchy-test--location-help (lsp-hierarchy-test--node "twice"))))
+        (should (= 0 (hash-table-count (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
+        (should (= 2 (length lsp-hierarchy-test--sent)))))))
+
+(ert-deftest lsp-hierarchy-outgoing-site-help-identifies-caller-source ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer lsp-hierarchy-test--source (insert "😀target();\n"))
+    (with-current-buffer (lsp-hierarchy-test--show 'call t)
+      (lsp-hierarchy-test--roots "caller")
+      (lsp-hierarchy-test--toggle "caller")
+      (lsp-hierarchy-test--reply
+       (car lsp-hierarchy-test--sent)
+       (vector (lsp-make-call-hierarchy-outgoing-call
+                :to (lsp-hierarchy-test--item "target" "file:///tmp/callee.c")
+                :from-ranges (vector (lsp-hierarchy-test--range 0 2 8)))))
+      (let* ((callee (lsp-hierarchy-test--node "target"))
+             (site (car (lsp-hierarchy--node-call-sites callee))))
+        (should (equal (lsp-hierarchy-test--location-help callee)
+                       "mouse-1, RET: Visit this symbol\nfile:///tmp/callee.c:1"))
+        (lsp-hierarchy-test--toggle "target")
+        (should (equal (lsp-hierarchy-test--location-help site)
+                       "mouse-1, RET: Visit this call site\nfile:///tmp/lsp-hierarchy-test.c:1"))
+        (should (string-match-p "😀target(); (line 1)" (buffer-string)))
+        (should (= 4 (count-lines (point-min) (point-max))))
+        (should (= 3 (length lsp-hierarchy-test--sent)))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
