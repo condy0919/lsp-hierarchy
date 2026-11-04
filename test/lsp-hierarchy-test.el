@@ -284,5 +284,30 @@
             (should (eq (plist-get request :workspace) a))
             (should (eq (plist-get params :item) item-a))))))))
 
+(ert-deftest lsp-hierarchy-loading-rows-are-request-local ()
+  "Finishing beta first must preserve alpha's loading row, including on error."
+  (dolist (errorp '(nil t))
+    (lsp-hierarchy-test--with-session
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (lsp-hierarchy-test--roots "alpha" "beta")
+        (lsp-hierarchy-test--toggle "alpha")
+        (let ((alpha-request (car lsp-hierarchy-test--sent)))
+          (lsp-hierarchy-test--toggle "beta")
+          (lsp-hierarchy-test--reply
+           (car lsp-hierarchy-test--sent)
+           (if errorp (lsp-make-json-error :code -32603 :message "Failed")
+             (vector (lsp-hierarchy-test--call "child-beta"))) errorp)
+          (let ((alpha (lsp-hierarchy-test--node "alpha"))
+                (beta (lsp-hierarchy-test--node "beta")))
+            (should (gethash alpha lsp-hierarchy--loading-table))
+            (should-not (gethash beta lsp-hierarchy--loading-table))
+            (goto-char (text-property-any (point-min) (point-max) 'lsp-hierarchy-item alpha))
+            (forward-line 1)
+            (should (get-text-property (point) 'lsp-hierarchy-loading))
+            (lsp-hierarchy-test--reply alpha-request (vector (lsp-hierarchy-test--call "child-alpha")))
+            (should-not (string-match-p "Loading" (buffer-string)))
+            (should (< (string-match "child-alpha" (buffer-string))
+                       (string-match "beta" (buffer-string))))))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
