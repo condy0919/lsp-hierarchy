@@ -138,6 +138,13 @@ several paths lead to the same protocol item."
 (defvar-local lsp-hierarchy-sort-order nil
   "Sibling order in this view: nil for server order, `name', or `location'.")
 
+(defvar-local lsp-hierarchy-filter-regexp nil
+  "Regexp matching loaded symbol names and details, or nil for all nodes.
+Filtering reveals matching ancestor paths without changing expansion state.")
+
+(defvar lsp-hierarchy--filter-matches nil
+  "Nodes retained by the current render's filter projection, or nil.")
+
 (defun lsp-hierarchy--cancel-request (token)
   "Cancel TOKEN and release handlers even when sending cancellation fails."
   ;; Keep this compatibility boundary until lsp-mode's cancellation cleanup
@@ -347,6 +354,31 @@ Show the URI and a line number starting at one, without reading files."
         (and (lsp-hierarchy--node-expanded parent)
              (lsp-hierarchy--visible-p parent)))))
 
+(defun lsp-hierarchy--matching-nodes (roots)
+  "Return a table of ROOTS' loaded matches and ancestors, or nil.
+Only protocol labels are searched; filtering never reads hidden source files
+or asks a language server to discover more nodes."
+  (when lsp-hierarchy-filter-regexp
+    (let ((matches (make-hash-table :test 'eq)))
+      (cl-labels
+          ((visit (node)
+             (let ((direct (and (eq (lsp-hierarchy--node-type node) 'symbol)
+                                (string-match-p
+                                 lsp-hierarchy-filter-regexp
+                                 (concat (lsp-hierarchy--node-name node) " "
+                                         (lsp-hierarchy--node-detail node)))))
+                   descendant)
+               ;; Visit every loaded child, even beneath folded ancestors.
+               (dolist (child (lsp-hierarchy--node-children node))
+                 (when (visit child) (setq descendant t)))
+               (when direct
+                 (dolist (site (lsp-hierarchy--node-call-sites node))
+                   (puthash site t matches)))
+               (when (or direct descendant)
+                 (puthash node t matches)))))
+        (mapc #'visit roots))
+      matches)))
+
 (defun lsp-hierarchy--location-less-p (left right)
   "Return non-nil if LEFT precedes RIGHT by URI and source position."
   (let ((left-uri (or (lsp-hierarchy--node-uri left) ""))
@@ -364,25 +396,35 @@ Show the URI and a line number starting at one, without reading files."
 
 (defun lsp-hierarchy--display-nodes (nodes)
   "Return NODES in presentation order without changing the model lists."
-  (if (null lsp-hierarchy-sort-order)
-      nodes
-    (let* ((symbol-p (lambda (node) (eq (lsp-hierarchy--node-type node) 'symbol)))
-           (symbols (seq-filter symbol-p nodes))
-           (sites (seq-remove symbol-p nodes)))
-      ;; Stable sorting keeps server order for equal keys.  Call sites
-      ;; retain source order before the independently sorted symbols.
-      (append sites
-              (cl-stable-sort
-               symbols (if (eq lsp-hierarchy-sort-order 'location)
-                           #'lsp-hierarchy--location-less-p
-                         (lambda (left right)
-                           (string-lessp (lsp-hierarchy--node-name left)
-                                         (lsp-hierarchy--node-name right)))))))))
+  (let ((visible (if lsp-hierarchy--filter-matches
+                     (seq-filter (lambda (node) (gethash node lsp-hierarchy--filter-matches)) nodes)
+                   nodes)))
+    (if (null lsp-hierarchy-sort-order)
+        visible
+      (let* ((symbol-p (lambda (node) (eq (lsp-hierarchy--node-type node) 'symbol)))
+             (symbols (seq-filter symbol-p visible))
+             (sites (seq-remove symbol-p visible)))
+        ;; Stable sorting keeps server order for equal keys.  Call sites
+        ;; retain source order before the independently sorted symbols.
+        (append sites
+                (cl-stable-sort
+                 symbols (if (eq lsp-hierarchy-sort-order 'location)
+                             #'lsp-hierarchy--location-less-p
+                           (lambda (left right)
+                             (string-lessp (lsp-hierarchy--node-name left)
+                                           (lsp-hierarchy--node-name right))))))))))
+
+(defun lsp-hierarchy--expanded-for-display-p (node)
+  "Return non-nil when NODE's children should appear in this projection."
+  (or (lsp-hierarchy--node-expanded node)
+      (and lsp-hierarchy--filter-matches
+           (seq-some (lambda (child) (gethash child lsp-hierarchy--filter-matches))
+                     (lsp-hierarchy--node-children node)))))
 
 (defun lsp-hierarchy--insert-subtree (node indent)
   "Render NODE and its visible descendants at INDENT."
   (lsp-hierarchy--insert-node node indent)
-  (when (lsp-hierarchy--node-expanded node)
+  (when (lsp-hierarchy--expanded-for-display-p node)
     ;; Call sites are already known from the incoming edge.  They remain
     ;; usable while the next level of relationships is loading or fails.
     (dolist (child (lsp-hierarchy--display-nodes (lsp-hierarchy--node-children node)))
@@ -438,6 +480,8 @@ can insert rows anywhere above the user's current position."
          (open-icon lsp-hierarchy-icon-open)
          (detailed lsp-hierarchy-detailed-outline)
          (sort-order lsp-hierarchy-sort-order)
+         (lsp-hierarchy--filter-matches
+          (lsp-hierarchy--matching-nodes (lsp-hierarchy--view-roots view)))
          (anchor (lsp-hierarchy--anchor (point)))
          (windows (mapcar (lambda (window)
                             (list window
@@ -455,8 +499,10 @@ can insert rows anywhere above the user's current position."
                    ('error (insert "Unable to load hierarchy: "
                                    (lsp-hierarchy--error-message (lsp-hierarchy--view-error view)) "\n"))
                    (_ (if (lsp-hierarchy--view-roots view)
-                          (dolist (node (lsp-hierarchy--display-nodes (lsp-hierarchy--view-roots view)))
-                            (lsp-hierarchy--insert-subtree node 0))
+                          (let ((roots (lsp-hierarchy--display-nodes (lsp-hierarchy--view-roots view))))
+                            (if roots
+                                (dolist (node roots) (lsp-hierarchy--insert-subtree node 0))
+                              (insert "No loaded symbols match the filter.\n")))
                         (insert "No hierarchy found.\n"))))
                  (buffer-string))))
     (let ((inhibit-read-only t))
@@ -494,6 +540,24 @@ can insert rows anywhere above the user's current position."
        (setq lsp-hierarchy-sort-order previous)
        (signal (car err) (cdr err))))
     (message "Hierarchy order: %s" (or lsp-hierarchy-sort-order 'server))))
+
+(defun lsp-hierarchy-filter (regexp)
+  "Show loaded symbols matching REGEXP and their ancestor paths.
+Match symbol names and details.  Empty REGEXP clears the filter and
+restores the model's folding state.  While filtering, matching paths remain
+visible even when their underlying nodes are folded.  No language-server
+requests are sent."
+  (interactive (list (read-string "Filter loaded symbols (empty clears): "
+                                  lsp-hierarchy-filter-regexp)))
+  ;; Validate before changing presentation state, so a typo preserves the view.
+  (unless (string-empty-p regexp) (string-match-p regexp ""))
+  (let ((previous lsp-hierarchy-filter-regexp))
+    (setq lsp-hierarchy-filter-regexp (unless (string-empty-p regexp) regexp))
+    (condition-case err
+        (lsp-hierarchy--render)
+      (error
+       (setq lsp-hierarchy-filter-regexp previous)
+       (signal (car err) (cdr err))))))
 
 (defun lsp-hierarchy--expandable-p (node)
   "Return non-nil if NODE has children or has not yet resolved them.
@@ -721,17 +785,21 @@ Preview does not add an xref history entry or run jump hooks."
     (append
      (list 'face 'lsp-hierarchy-icon-face
            'display (if expandable
-                        (if (lsp-hierarchy--node-expanded item)
+                        (if (lsp-hierarchy--expanded-for-display-p item)
                             lsp-hierarchy-icon-open
                           lsp-hierarchy-icon-close)
                       " "))
      (when expandable
        (lsp-hierarchy--action-properties
         #'lsp-hierarchy-toggle
-        (cond ((eq (lsp-hierarchy--node-load-state item) 'error)
-               "mouse-1, TAB: Retry loading children")
-              ((lsp-hierarchy--node-expanded item) "mouse-1, TAB: Fold this branch")
-              (t "mouse-1, TAB: Expand this branch")))))))
+        (concat
+         (cond ((eq (lsp-hierarchy--node-load-state item) 'error)
+                "mouse-1, TAB: Retry loading children")
+               ((lsp-hierarchy--node-expanded item) "mouse-1, TAB: Fold this branch")
+               (t "mouse-1, TAB: Expand this branch"))
+         (when (and lsp-hierarchy--filter-matches
+                    (lsp-hierarchy--expanded-for-display-p item))
+           "\nFilter keeps matching paths visible; clear it to apply folding")))))))
 
 ;;; Major Mode Definition
 
@@ -749,6 +817,7 @@ Preview does not add an xref history entry or run jump hooks."
     (define-key map (kbd "RET") #'lsp-hierarchy-goto)
     (define-key map (kbd "SPC") #'lsp-hierarchy-preview)
     (define-key map (kbd "s") #'lsp-hierarchy-cycle-sort)
+    (define-key map (kbd "/") #'lsp-hierarchy-filter)
     (define-key map (kbd "g") #'lsp-hierarchy-refresh)
     (define-key map (kbd "?") #'describe-mode)
     map)
