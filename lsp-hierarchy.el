@@ -78,6 +78,11 @@ other than the hierarchy window."
   "Face for symbol/function nodes."
   :group 'lsp-hierarchy)
 
+(defface lsp-hierarchy-deprecated-face
+  '((t :inherit lsp-hierarchy-node-face :strike-through t))
+  "Face for symbol names marked deprecated by the language server."
+  :group 'lsp-hierarchy)
+
 (defface lsp-hierarchy-detail-face
   '((t :inherit shadow))
   "Face for detail and line info."
@@ -113,7 +118,7 @@ Each occurrence has independent expansion and request state, even when
 several paths lead to the same protocol item.  The node object itself is
 its identity; view roots and parent/child links own the model."
   ;; Protocol items belong to their server, including any opaque `data'.
-  workspace lsp-item type name kind detail annotation uri range
+  workspace lsp-item type name kind tags detail annotation uri range
   ;; call-sites describe the incoming edge, not the shared symbol itself.
   ;; children starts with known call sites; relationship children are added
   ;; when their independent request completes.
@@ -338,7 +343,11 @@ Show the URI and a line number starting at one, without reading files."
        ;; of parsing a formatted label back into name and signature.
        (insert (apply #'propertize
                       (lsp-hierarchy--single-line (lsp-hierarchy--node-name item))
-                      'face 'lsp-hierarchy-node-face
+                      ;; SymbolTag.Deprecated is 1.  Unknown tags leave the
+                      ;; ordinary symbol style intact; details remain separate.
+                      'face (if (seq-contains-p (lsp-hierarchy--node-tags item) 1)
+                                'lsp-hierarchy-deprecated-face
+                              'lsp-hierarchy-node-face)
                       (lsp-hierarchy--action-properties
                        #'lsp-hierarchy-goto
                        (lsp-hierarchy--location-help item "mouse-1, RET: Visit this symbol"))))
@@ -1106,6 +1115,7 @@ selectionRange identifies the name rather than its whole declaration."
   (lsp-hierarchy--make-node
    :workspace workspace :lsp-item item :type 'symbol
    :name (lsp-get item :name) :kind (lsp-get item :kind)
+   :tags (lsp-get item :tags)
    :detail (lsp-get item :detail) :annotation annotation
    :uri (lsp-get item :uri) :range (lsp-get item :selectionRange)))
 

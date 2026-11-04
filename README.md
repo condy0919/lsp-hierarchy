@@ -67,7 +67,7 @@ You can bind the primary commands to your preferred keys or add them to the `lsp
 
 The header shows the current hierarchy direction, sort order, and active filter throughout loading and refresh.
 
-Click an arrow to expand or fold, a symbol name or call site to visit source, or an error row to retry. Hover over names and call sites to see their full URI and line number. Symbol labels cover all standard LSP symbol kinds; detailed labels also show the number of known call sites on that edge.
+Click an arrow to expand or fold, a symbol name or call site to visit source, or an error row to retry. Hover over names and call sites to see their full URI and line number. Symbol labels cover all standard LSP symbol kinds; detailed labels also show the number of known call sites on that edge. Deprecated symbol names use strike-through styling while their signatures retain the ordinary detail face.
 
 Nodes can be folded while loading. Known call sites appear immediately on expansion, while deeper relationships load independently. A response arriving under a folded node is cached without reopening it. A node with no child symbols or call sites becomes a leaf and loses its expansion arrow; an empty root result displays `No hierarchy found.` If the initial request fails, use `g` to retry.
 

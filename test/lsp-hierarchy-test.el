@@ -2701,5 +2701,45 @@
       (delete-file file))))
 
 
+(ert-deftest lsp-hierarchy-deprecated-tags-style-only-symbol-name ()
+  (with-temp-buffer
+    (lsp-hierarchy-mode)
+    (let* ((item (lsp-hierarchy-test--item "old name" nil '(opaque)))
+           (tags [1 99]))
+      (lsp-put item :tags tags)
+      (lsp-put item :detail " (argument)")
+      (let ((node (lsp-hierarchy--symbol-node item nil))
+            (inhibit-read-only t))
+        (lsp-hierarchy--insert-node node 0)
+        (goto-char (point-min))
+        (search-forward "old name")
+        (should (eq (get-text-property (1- (point)) 'face) 'lsp-hierarchy-deprecated-face))
+        (search-forward "argument")
+        (should (eq (get-text-property (1- (point)) 'face) 'lsp-hierarchy-detail-face))
+        (should (eq (face-attribute 'lsp-hierarchy-deprecated-face :inherit) 'lsp-hierarchy-node-face))
+        (should (eq (face-attribute 'lsp-hierarchy-deprecated-face :strike-through) t))
+        (should (eq (lsp-hierarchy--node-lsp-item node) item))
+        (should (eq (lsp-hierarchy--node-tags node) tags))
+        (should (equal (lsp-get item :tags) [1 99]))
+        (should (equal (lsp-get item :name) "old name"))
+        (should (equal (lsp-get item :detail) " (argument)"))
+        (should (equal (lsp-get item :data) '(opaque)))))))
+
+(ert-deftest lsp-hierarchy-deprecated-tag-handles-missing-and-unknown-tags ()
+  (dolist (entry '((nil . lsp-hierarchy-node-face)
+                   ([] . lsp-hierarchy-node-face)
+                   ([99] . lsp-hierarchy-node-face)
+                   ([1] . lsp-hierarchy-deprecated-face)
+                   ((1) . lsp-hierarchy-deprecated-face)))
+    (lsp-hierarchy-test--with-session
+      (with-current-buffer (lsp-hierarchy-test--show 'type)
+        (let ((item (lsp-hierarchy-test--item "symbol")))
+          (lsp-put item :tags (car entry))
+          (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) (vector item))
+          (goto-char (point-min))
+          (search-forward "symbol")
+          (should (eq (get-text-property (1- (point)) 'face) (cdr entry))))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
