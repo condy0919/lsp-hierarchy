@@ -90,13 +90,21 @@ Zero leaves roots closed; one loads their immediate children."
     (23 "s") (10 "e") (14 "C") (7 "p") (8 "v") (1 "F")
     (t "")))
 
-;;; Core: Buffer State & Hash Storage
+;;; Core: View and Node State
+
+(cl-defstruct (lsp-hierarchy--node (:constructor lsp-hierarchy--make-node))
+  "One occurrence of an LSP item in a hierarchy view.
+Each occurrence has independent expansion and request state, even when
+several paths lead to the same protocol item."
+  (id (make-symbol "lsp-hierarchy-node"))
+  workspace lsp-item type label kind detail uri range children children-fn goto-fn
+  ;; Expansion is a user choice; loading can finish while a node is folded.
+  expanded (load-state 'unloaded) request error)
 
 (defvar-local lsp-hierarchy--source-buffer nil
   "The buffer from which the hierarchy was requested.")
-(defvar-local lsp-hierarchy--state-table nil "Hash table mapping item to its open/close state.")
-(defvar-local lsp-hierarchy--loaded-table nil "Hash table mapping item to t if loaded.")
-(defvar-local lsp-hierarchy--loading-table nil "Hash table mapping item to t if loading.")
+(defvar-local lsp-hierarchy--nodes nil
+  "Map stable occurrence IDs to nodes in this view.")
 
 (defvar-local lsp-hierarchy--generation nil
   "Identity of the currently requested view, used to reject late responses.")
@@ -247,11 +255,11 @@ for the `lsp-hierarchy-label-bound' property and parsing the text."
   "Render and insert hierarchy ITEM at INDENT level within HIERARCHY context.
 The rendered line includes indentation, expansion icons (for symbols),
 LSP kind abbreviations, the symbol label, and any extra details."
-  (let* ((type (plist-get item :type))
-         (label (plist-get item :label))
-         (kind (plist-get item :kind))
-         (detail (plist-get item :detail))
-         (cfn (plist-get item :children-fn))
+  (let* ((type (and item (lsp-hierarchy--node-type item)))
+         (label (lsp-hierarchy--node-label item))
+         (kind (lsp-hierarchy--node-kind item))
+         (detail (lsp-hierarchy--node-detail item))
+         (cfn (and item (lsp-hierarchy--node-children-fn item)))
          (beg (point)))
     (insert (make-string (* indent 2) ?\s))
 
@@ -259,11 +267,11 @@ LSP kind abbreviations, the symbol label, and any extra details."
       ;; Read call-site text only when its row becomes part of the view.
       ;; Unopened siblings keep protocol locations without doing file I/O.
       (insert "    " (or label (lsp-hierarchy--extract-line
-                               (plist-get item :uri) (plist-get item :range)
-                               (plist-get item :workspace)))))
+                               (lsp-hierarchy--node-uri item) (lsp-hierarchy--node-range item)
+                               (lsp-hierarchy--node-workspace item)))))
 
     (when (eq type 'symbol)
-      (if (or cfn (hierarchy-children hierarchy (plist-get item :id)))
+      (if (or cfn (hierarchy-children hierarchy (lsp-hierarchy--node-id item)))
           (insert (propertize "@" 'lsp-hierarchy-icon-marker t) " ")
         (insert "  "))
       (when-let* ((abbrev (lsp-hierarchy--kind-abbrev kind)))
@@ -317,7 +325,7 @@ LSP kind abbreviations, the symbol label, and any extra details."
               (outline-flag-region (line-beginning-position) (line-beginning-position 2)
                                    (and hidden-depth t))
               (when (and (not hidden-depth) child
-                         (eq (gethash child lsp-hierarchy--state-table) 'close))
+                         (not (lsp-hierarchy--node-expanded child)))
                 (setq hidden-depth depth)))
             (forward-line 1)))))))
 
@@ -327,23 +335,23 @@ LSP kind abbreviations, the symbol label, and any extra details."
   (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
          (h (lsp-hierarchy--get-prop 'lsp-hierarchy-tree))
          (indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent))
-         (type (plist-get item :type))
-         (cfn (plist-get item :children-fn)))
+         (type (and item (lsp-hierarchy--node-type item)))
+         (cfn (and item (lsp-hierarchy--node-children-fn item))))
     (unless item
       (user-error "No node here"))
     (if (eq type 'code)
         (forward-line 1)
       (cond
-       ((or (gethash item lsp-hierarchy--loaded-table)
-            (gethash item lsp-hierarchy--loading-table))
-        (let ((current-state (gethash item lsp-hierarchy--state-table)))
-          (if (eq current-state 'open)
+       ((or (eq (lsp-hierarchy--node-load-state item) 'loaded)
+            (eq (lsp-hierarchy--node-load-state item) 'loading))
+        (let ((current-state (lsp-hierarchy--node-expanded item)))
+          (if current-state
               (progn
                 (lsp-hierarchy--set-subtree-visibility 'hide)
-                (puthash item 'close lsp-hierarchy--state-table))
+                (setf (lsp-hierarchy--node-expanded item) nil))
             (progn
               (lsp-hierarchy--set-subtree-visibility 'show)
-              (puthash item 'open lsp-hierarchy--state-table)))
+              (setf (lsp-hierarchy--node-expanded item) t)))
           (font-lock-flush (line-beginning-position) (line-end-position))))
 
        (cfn
@@ -352,15 +360,17 @@ LSP kind abbreviations, the symbol label, and any extra details."
 (defun lsp-hierarchy--load-async (item indent hierarchy &optional depth)
   "Load ITEM at INDENT in HIERARCHY, expanding up to DEPTH levels."
   (let* ((depth (or depth 1))
-         (cfn (plist-get item :children-fn))
-         (precomputed (plist-get item :children))
+         (cfn (and item (lsp-hierarchy--node-children-fn item)))
+         (precomputed (lsp-hierarchy--node-children item))
          (source lsp-hierarchy--source-buffer)
          (origin (copy-marker (line-beginning-position) t))
          (marker (copy-marker (line-beginning-position 2)))
          (token (make-symbol "lsp-hierarchy-node-request"))
          placeholder)
-    (puthash item token lsp-hierarchy--loading-table)
-    (puthash item 'open lsp-hierarchy--state-table)
+    (setf (lsp-hierarchy--node-request item) token
+          (lsp-hierarchy--node-load-state item) 'loading
+          (lsp-hierarchy--node-error item) nil)
+    (setf (lsp-hierarchy--node-expanded item) t)
     (font-lock-flush (line-beginning-position) (line-end-position))
     (let ((inhibit-read-only t))
       (save-excursion
@@ -383,15 +393,16 @@ LSP kind abbreviations, the symbol label, and any extra details."
              (delete-region pos (overlay-end placeholder))
              (delete-overlay placeholder)))
          (finish ()
-           (remhash item lsp-hierarchy--loading-table)
+           (setf (lsp-hierarchy--node-request item) nil)
            (set-marker marker nil)
            (set-marker origin nil))
          (fail (err)
            (let ((inhibit-read-only t))
              (save-excursion
                (remove-loading)
-               (puthash item 'close lsp-hierarchy--state-table)
-               (remhash item lsp-hierarchy--loaded-table)
+               (setf (lsp-hierarchy--node-expanded item) nil)
+               (setf (lsp-hierarchy--node-load-state item) 'error
+                     (lsp-hierarchy--node-error item) err)
                (goto-char origin)
                (font-lock-flush (line-beginning-position) (line-end-position))))
            (finish)
@@ -404,20 +415,20 @@ LSP kind abbreviations, the symbol label, and any extra details."
                    (remove-loading)
                    (goto-char marker)
                    (dolist (child (append precomputed children))
-                     (hierarchy-add-tree hierarchy (plist-get child :id) (lambda (_) (plist-get item :id)))
-                     (puthash child 'close lsp-hierarchy--state-table)
+                     (hierarchy-add-tree hierarchy (lsp-hierarchy--node-id child) (lambda (_) (lsp-hierarchy--node-id item)))
+                     (puthash (lsp-hierarchy--node-id child) child lsp-hierarchy--nodes)
                      (let ((start (point)))
                        (lsp-hierarchy--insert-node child (1+ indent) hierarchy)
-                       (when (and (> depth 1) (plist-get child :children-fn))
+                       (when (and (> depth 1) (lsp-hierarchy--node-children-fn child))
                          (push (cons child (copy-marker start t)) expand))))
-                   (puthash item t lsp-hierarchy--loaded-table)
+                   (setf (lsp-hierarchy--node-load-state item) 'loaded)
                    (goto-char origin)
                    (lsp-hierarchy--set-subtree-visibility
-                    (if (eq (gethash item lsp-hierarchy--state-table) 'open) 'show 'hide)))
+                    (if (lsp-hierarchy--node-expanded item) 'show 'hide)))
                  ;; Keep a finite depth budget with this request.  Point may
                  ;; have moved, and the user may have folded an ancestor.
                  (unwind-protect
-                     (when (and (eq (gethash item lsp-hierarchy--state-table) 'open)
+                     (when (and (lsp-hierarchy--node-expanded item)
                                 (not (invisible-p origin)))
                        (dolist (entry (reverse expand))
                          (save-excursion
@@ -436,7 +447,7 @@ LSP kind abbreviations, the symbol label, and any extra details."
   "Jump to the source location of the item at point."
   (interactive)
   (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
-         (goto-fn (plist-get item :goto-fn)))
+         (goto-fn (and item (lsp-hierarchy--node-goto-fn item))))
     (if goto-fn
         (funcall goto-fn)
       (user-error "No location for this node"))))
@@ -446,8 +457,8 @@ LSP kind abbreviations, the symbol label, and any extra details."
   (interactive)
   (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
          (h (lsp-hierarchy--get-prop 'lsp-hierarchy-tree))
-         (cfn (plist-get item :children-fn)))
-    (if (and item (or cfn (hierarchy-children h (plist-get item :id))))
+         (cfn (and item (lsp-hierarchy--node-children-fn item))))
+    (if (and item (or cfn (hierarchy-children h (lsp-hierarchy--node-id item))))
         (lsp-hierarchy-toggle)
       (outline-next-heading))))
 
@@ -479,9 +490,9 @@ LSP kind abbreviations, the symbol label, and any extra details."
   "Return font-lock properties (face and display) for icon at START."
   (let* ((item (get-text-property start 'lsp-hierarchy-item))
          (h (get-text-property start 'lsp-hierarchy-tree))
-         (cfn (plist-get item :children-fn)))
-    (if (and item (or cfn (hierarchy-children h (plist-get item :id))))
-        (let ((icon (if (eq (gethash item lsp-hierarchy--state-table) 'open)
+         (cfn (and item (lsp-hierarchy--node-children-fn item))))
+    (if (and item (or cfn (hierarchy-children h (lsp-hierarchy--node-id item))))
+        (let ((icon (if (lsp-hierarchy--node-expanded item)
                         lsp-hierarchy-icon-open
                       lsp-hierarchy-icon-close)))
           (list 'face 'lsp-hierarchy-icon-face
@@ -538,9 +549,7 @@ LSP kind abbreviations, the symbol label, and any extra details."
   (setq-local lsp-hierarchy--file-cache (make-hash-table :test 'equal))
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t)
-  (setq-local lsp-hierarchy--state-table (make-hash-table :test 'eq))
-  (setq-local lsp-hierarchy--loaded-table (make-hash-table :test 'eq))
-  (setq-local lsp-hierarchy--loading-table (make-hash-table :test 'eq))
+  (setq-local lsp-hierarchy--nodes (make-hash-table :test 'eq))
 
   (setq font-lock-defaults '(lsp-hierarchy-font-lock-keywords)))
 
@@ -567,31 +576,29 @@ OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
                  (label (if (eq view-type 'call)
                             (lsp-render-symbol root lsp-hierarchy-detailed-outline)
                           (lsp-get root :name)))
-                 (item (list :id (make-symbol "lsp-hierarchy-node")
-                             :workspace workspace :label label
-                             :kind (lsp-get root :kind)
-                             :lsp-item root
-                             :type 'symbol)))
-            (setq item
-                  (plist-put item :children-fn
-                             (if (eq view-type 'call)
-                                 (lambda (it s cb err token)
-                                   (lsp-hierarchy--call-hierarchy-children it s cb outgoing-or-direction err token))
-                               (lambda (it s cb err token)
-                                 (lsp-hierarchy--type-hierarchy-children it s cb outgoing-or-direction err token)))))
+                 (item (lsp-hierarchy--make-node
+                        :workspace workspace :label label
+                        :kind (lsp-get root :kind)
+                        :lsp-item root
+                        :type 'symbol)))
+            (setf (lsp-hierarchy--node-children-fn item)
+                  (if (eq view-type 'call)
+                      (lambda (it s cb err token)
+                        (lsp-hierarchy--call-hierarchy-children it s cb outgoing-or-direction err token))
+                    (lambda (it s cb err token)
+                      (lsp-hierarchy--type-hierarchy-children it s cb outgoing-or-direction err token))))
             ;; selectionRange identifies the symbol name; range may also
             ;; include its documentation and body.  Roots are navigable in
             ;; both call and type views.
-            (setq item (plist-put item :goto-fn
-                                  (lambda () (lsp-hierarchy--open-file
-                                              (lsp-get root :uri) (lsp-get root :selectionRange) workspace))))
+            (setf (lsp-hierarchy--node-goto-fn item)
+                  (lambda () (lsp-hierarchy--open-file
+                              (lsp-get root :uri) (lsp-get root :selectionRange) workspace)))
 
-            ;; hierarchy.el uses equal keys.  Store stable IDs there and use
-            ;; identity-based state tables: workspace state and closures can
-            ;; change without changing a rendered node's identity.
-            (hierarchy-add-tree h (plist-get item :id) nil)
-            (puthash item 'close lsp-hierarchy--state-table)
-            (puthash item nil lsp-hierarchy--loaded-table)
+            ;; hierarchy.el uses equal keys.  Stable IDs keep mutable node
+            ;; state out of its relation keys.
+            (hierarchy-add-tree h (lsp-hierarchy--node-id item) nil)
+            (setf (lsp-hierarchy--node-expanded item) nil)
+            (puthash (lsp-hierarchy--node-id item) item lsp-hierarchy--nodes)
             (let ((start (point)))
               (lsp-hierarchy--insert-node item 0 h)
               (push (cons item (copy-marker start t)) initial-nodes)))))
@@ -696,34 +703,34 @@ SB is the source buffer.  CALLBACK is called with the results.
 OUTGOING is non-nil for outgoing calls.
 ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
   (let* ((method (if outgoing "callHierarchy/outgoingCalls" "callHierarchy/incomingCalls"))
-         (lsp-p (plist-get item :lsp-item))
+         (lsp-p (lsp-hierarchy--node-lsp-item item))
          (parent-uri (lsp-get lsp-p :uri))
-         (workspace (plist-get item :workspace)))
+         (workspace (lsp-hierarchy--node-workspace item)))
     (lsp-hierarchy--request sb
-       method (list :item lsp-p)
-       (lambda (res)
-         (funcall callback
-                  (mapcar
-                   (lambda (call)
-                     (let* ((tar (if outgoing (lsp:call-hierarchy-outgoing-call-to call) (lsp:call-hierarchy-incoming-call-from call)))
-                            (uri (lsp-get tar :uri))
-                            (call-uri (if outgoing parent-uri uri)))
-                       (list :id (make-symbol "lsp-hierarchy-node") :workspace workspace
-                             :label (lsp-render-symbol tar lsp-hierarchy-detailed-outline)
-                             :kind (lsp-get tar :kind)
-                             :lsp-item tar
-                             :type 'symbol
-                             :goto-fn (lambda () (lsp-hierarchy--open-file uri (lsp-get tar :selectionRange) workspace))
-                             :children (mapcar (lambda (r)
-                                                 (list :id (make-symbol "lsp-hierarchy-node") :workspace workspace
-                                                       :uri call-uri :range r
-                                                       :type 'code
-                                                       :goto-fn (lambda () (lsp-hierarchy--open-file call-uri r workspace))))
-                                               (append (lsp-get call :fromRanges) nil))
-                             :children-fn (lambda (it s cb err token)
-                                             (lsp-hierarchy--call-hierarchy-children it s cb outgoing err token)))))
-                   res)))
-       error-handler token (list workspace))))
+			    method (list :item lsp-p)
+			    (lambda (res)
+			      (funcall callback
+				       (mapcar
+					(lambda (call)
+					  (let* ((tar (if outgoing (lsp:call-hierarchy-outgoing-call-to call) (lsp:call-hierarchy-incoming-call-from call)))
+						 (uri (lsp-get tar :uri))
+						 (call-uri (if outgoing parent-uri uri)))
+					    (lsp-hierarchy--make-node :workspace workspace
+								      :label (lsp-render-symbol tar lsp-hierarchy-detailed-outline)
+								      :kind (lsp-get tar :kind)
+								      :lsp-item tar
+								      :type 'symbol
+								      :goto-fn (lambda () (lsp-hierarchy--open-file uri (lsp-get tar :selectionRange) workspace))
+								      :children (mapcar (lambda (r)
+											  (lsp-hierarchy--make-node :workspace workspace
+														    :uri call-uri :range r
+														    :type 'code
+														    :goto-fn (lambda () (lsp-hierarchy--open-file call-uri r workspace))))
+											(append (lsp-get call :fromRanges) nil))
+								      :children-fn (lambda (it s cb err token)
+										     (lsp-hierarchy--call-hierarchy-children it s cb outgoing err token)))))
+					res)))
+			    error-handler token (list workspace))))
 
 (defun lsp-hierarchy--prepare (view-type direction)
   "Prepare VIEW-TYPE in DIRECTION, keeping only the latest requested view."
@@ -786,23 +793,23 @@ SB is the source buffer.  CALLBACK is called with the results.
 DIRECTION is \='supertypes or \='subtypes.
 ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
   (let ((method (if (eq direction 'supertypes) "typeHierarchy/supertypes" "typeHierarchy/subtypes"))
-        (lsp-it (plist-get item :lsp-item))
-        (workspace (plist-get item :workspace)))
+        (lsp-it (lsp-hierarchy--node-lsp-item item))
+        (workspace (lsp-hierarchy--node-workspace item)))
     (lsp-hierarchy--request sb
-       method (list :item lsp-it)
-       (lambda (res)
-         (funcall callback
-                  (mapcar (lambda (it)
-                            (list :id (make-symbol "lsp-hierarchy-node") :workspace workspace
-                                  :label (concat (lsp-get it :name) (if (eq direction 'supertypes) " ↑" " ↓"))
-                                  :kind (lsp-get it :kind)
-                                  :lsp-item it
-                                  :type 'symbol
-                                  :goto-fn (lambda () (lsp-hierarchy--open-file (lsp-get it :uri) (lsp-get it :selectionRange) workspace))
-                                  :children-fn (lambda (it sb cb err token)
-                                                  (lsp-hierarchy--type-hierarchy-children it sb cb direction err token))))
-                          res)))
-       error-handler token (list workspace))))
+			    method (list :item lsp-it)
+			    (lambda (res)
+			      (funcall callback
+				       (mapcar (lambda (it)
+						 (lsp-hierarchy--make-node :workspace workspace
+									   :label (concat (lsp-get it :name) (if (eq direction 'supertypes) " ↑" " ↓"))
+									   :kind (lsp-get it :kind)
+									   :lsp-item it
+									   :type 'symbol
+									   :goto-fn (lambda () (lsp-hierarchy--open-file (lsp-get it :uri) (lsp-get it :selectionRange) workspace))
+									   :children-fn (lambda (it sb cb err token)
+											  (lsp-hierarchy--type-hierarchy-children it sb cb direction err token))))
+					       res)))
+			    error-handler token (list workspace))))
 
 (provide 'lsp-hierarchy)
 ;;; lsp-hierarchy.el ends here
