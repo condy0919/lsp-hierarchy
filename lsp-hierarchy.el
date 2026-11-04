@@ -97,7 +97,7 @@ Zero leaves roots closed; one loads their immediate children."
 Each occurrence has independent expansion and request state, even when
 several paths lead to the same protocol item."
   (id (make-symbol "lsp-hierarchy-node"))
-  workspace lsp-item type label kind detail uri range children children-fn goto-fn
+  workspace lsp-item type name kind detail annotation uri range children children-fn goto-fn
   ;; Expansion is a user choice; loading can finish while a node is folded.
   expanded (load-state 'unloaded) request error)
 
@@ -214,76 +214,35 @@ NO-MERGE preserves workspace ownership of responses."
 
 ;;; Core: Rendering Engine
 
-(defun lsp-hierarchy--match-node-label (limit)
-  "Match function for font-lock to identify symbol node labels up to LIMIT.
-This identifies the symbol name and its signature/details by looking
-for the `lsp-hierarchy-label-bound' property and parsing the text."
-  (let ((found nil))
-    (while (and (not found) (< (point) limit))
-      (let ((bound (get-text-property (point) 'lsp-hierarchy-label-bound))
-            (next-change (next-single-property-change (point) 'lsp-hierarchy-label-bound nil limit)))
-        (if bound
-            (let* ((beg (point))
-                   (end (or next-change limit))
-                   (label (buffer-substring-no-properties beg end)))
-              (if (string-match "\\([^ ]+\\)\\( +\\(.+\\)\\)?" label)
-                  (let* ((name-len (length (match-string 1 label)))
-                         (sig-beg-idx (match-beginning 3))
-                         (name-end beg)
-                         (sig-beg end)
-                         (sig-end end))
-                    (setq name-end (+ beg name-len))
-                    (when sig-beg-idx
-                      (setq sig-beg (+ beg sig-beg-idx))
-                      (setq sig-end end))
-                    (set-match-data (list beg end
-                                          beg name-end
-                                          ;; The detail group is optional.  A
-                                          ;; bare symbol still needs valid
-                                          ;; match data for font-lock.
-                                          (when (match-beginning 2)
-                                            (+ beg (match-beginning 2)))
-                                          (when (match-end 2) end)
-                                          sig-beg sig-end)))
-                (set-match-data (list beg end beg end)))
-              (goto-char end)
-              (setq found t))
-          (goto-char (or next-change limit)))))
-    found))
-
 (defun lsp-hierarchy--insert-node (item indent hierarchy)
-  "Render and insert hierarchy ITEM at INDENT level within HIERARCHY context.
-The rendered line includes indentation, expansion icons (for symbols),
-LSP kind abbreviations, the symbol label, and any extra details."
-  (let* ((type (and item (lsp-hierarchy--node-type item)))
-         (label (lsp-hierarchy--node-label item))
-         (kind (lsp-hierarchy--node-kind item))
-         (detail (lsp-hierarchy--node-detail item))
-         (beg (point)))
+  "Insert ITEM at INDENT using its structured name and location.
+HIERARCHY contains loaded relationships used to choose the expander."
+  (let ((beg (point)))
     (insert (make-string (* indent 2) ?\s))
-
-    (when (eq type 'code)
-      ;; Read call-site text only when its row becomes part of the view.
-      ;; Unopened siblings keep protocol locations without doing file I/O.
-      (insert "    " (or label (lsp-hierarchy--extract-line
-                               (lsp-hierarchy--node-uri item) (lsp-hierarchy--node-range item)
-                               (lsp-hierarchy--node-workspace item)))))
-
-    (when (eq type 'symbol)
-      (if (lsp-hierarchy--expandable-p item hierarchy)
-          (insert (propertize "@" 'lsp-hierarchy-icon-marker t) " ")
-        (insert "  "))
-      (when-let* ((abbrev (lsp-hierarchy--kind-abbrev kind)))
-        (unless (string-empty-p abbrev)
-          (insert "[" abbrev "] ")))
-
-      (let ((l-beg (point)))
-        (insert label)
-        (add-text-properties l-beg (point) '(lsp-hierarchy-label-bound t))))
-
-    (when detail
-      (insert " " detail))
-
+    (pcase (lsp-hierarchy--node-type item)
+      ('code
+       ;; Source reads stay lazy: unopened siblings contain only locations.
+       (insert "    " (lsp-hierarchy--extract-line
+                        (lsp-hierarchy--node-uri item)
+                        (lsp-hierarchy--node-range item)
+                        (lsp-hierarchy--node-workspace item))))
+      ('symbol
+       (insert (apply #'propertize "@" 'lsp-hierarchy-icon-marker t
+                      (lsp-hierarchy--icon-properties item hierarchy)) " ")
+       (let ((abbrev (lsp-hierarchy--kind-abbrev (lsp-hierarchy--node-kind item))))
+         (unless (string-empty-p abbrev)
+           (insert (propertize (concat "[" abbrev "] ")
+                               'face 'lsp-hierarchy-detail-face))))
+       ;; Names may contain spaces.  Style protocol fields directly instead
+       ;; of parsing a formatted label back into name and signature.
+       (insert (propertize (lsp-hierarchy--node-name item) 'face 'lsp-hierarchy-node-face))
+       (when-let* ((detail (and lsp-hierarchy-detailed-outline
+                               (lsp-hierarchy--node-detail item)))
+                   ((not (string-empty-p detail))))
+         (insert (propertize (concat " " (string-trim-left detail))
+                             'face 'lsp-hierarchy-detail-face)))
+       (when-let* ((annotation (lsp-hierarchy--node-annotation item)))
+         (insert (propertize annotation 'face 'lsp-hierarchy-detail-face)))))
     (add-text-properties beg (point)
                          (list 'lsp-hierarchy-item item
                                'lsp-hierarchy-tree hierarchy
@@ -361,7 +320,7 @@ response is a leaf, whereas an error remains retryable."
             (progn
               (lsp-hierarchy--set-subtree-visibility 'show)
               (setf (lsp-hierarchy--node-expanded item) t)))
-          (font-lock-flush (line-beginning-position) (line-end-position))))
+          (lsp-hierarchy--update-icon)))
 
        (cfn
         (lsp-hierarchy--load-async item indent h))))))
@@ -380,7 +339,7 @@ response is a leaf, whereas an error remains retryable."
           (lsp-hierarchy--node-load-state item) 'loading
           (lsp-hierarchy--node-error item) nil)
     (setf (lsp-hierarchy--node-expanded item) t)
-    (font-lock-flush (line-beginning-position) (line-end-position))
+    (lsp-hierarchy--update-icon)
     (let ((inhibit-read-only t))
       (save-excursion
         (goto-char marker)
@@ -413,7 +372,7 @@ response is a leaf, whereas an error remains retryable."
                (setf (lsp-hierarchy--node-load-state item) 'error
                      (lsp-hierarchy--node-error item) err)
                (goto-char origin)
-               (font-lock-flush (line-beginning-position) (line-end-position))))
+               (lsp-hierarchy--update-icon)))
            (finish)
            (message "LSP hierarchy: %s (TAB to retry)" (lsp-hierarchy--error-message err)))
          (succeed (children)
@@ -434,7 +393,7 @@ response is a leaf, whereas an error remains retryable."
                    (goto-char origin)
                    (lsp-hierarchy--set-subtree-visibility
                     (if (lsp-hierarchy--node-expanded item) 'show 'hide))
-                   (font-lock-flush (line-beginning-position) (line-end-position)))
+                   (lsp-hierarchy--update-icon))
                  ;; Keep a finite depth budget with this request.  Point may
                  ;; have moved, and the user may have folded an ancestor.
                  (unwind-protect
@@ -471,53 +430,34 @@ response is a leaf, whereas an error remains retryable."
         (lsp-hierarchy-toggle)
       (outline-next-heading))))
 
-;;; Regular Expression & Matchers
+;;; Expansion Indicators
 
 (defvar lsp-hierarchy--outline-regexp
   (rx line-start (* space) "@")
   "Regular expression to match the start of a hierarchy node line.")
 
-(defvar lsp-hierarchy--detail-regexp
-  (rx "[" (or "c" "m" "M" "I" "f" "s" "e" "C" "p" "v" "F") "]")
-  "Regular expression to match the LSP symbol kind abbreviation.")
+(defun lsp-hierarchy--icon-properties (item hierarchy)
+  "Return display properties for ITEM's expander in HIERARCHY."
+  (list 'face 'lsp-hierarchy-icon-face
+        'display (if (lsp-hierarchy--expandable-p item hierarchy)
+                     (if (lsp-hierarchy--node-expanded item)
+                         lsp-hierarchy-icon-open
+                       lsp-hierarchy-icon-close)
+                   " ")
+        'mouse-face 'highlight))
 
-(defun lsp-hierarchy--match-icon-marker (limit)
-  "Match function for font-lock to find icon markers up to LIMIT."
-  (let ((found nil))
-    (while (and (not found) (< (point) limit))
-      (let ((marker (get-text-property (point) 'lsp-hierarchy-icon-marker))
-            (next-change (next-single-property-change (point) 'lsp-hierarchy-icon-marker nil limit)))
-        (if marker
-            (progn
-              (set-match-data (list (point) (1+ (point))))
-              (forward-char 1)
-              (setq found t))
-          (goto-char (or next-change limit)))))
-    found))
-
-(defun lsp-hierarchy--get-icon-properties (start)
-  "Return font-lock properties (face and display) for icon at START."
-  (let* ((item (get-text-property start 'lsp-hierarchy-item))
-         (h (get-text-property start 'lsp-hierarchy-tree)))
-    (if (lsp-hierarchy--expandable-p item h)
-        (let ((icon (if (lsp-hierarchy--node-expanded item)
-                        lsp-hierarchy-icon-open
-                      lsp-hierarchy-icon-close)))
-          (list 'face 'lsp-hierarchy-icon-face
-                'display icon
-                'mouse-face 'highlight))
-      (list 'face 'default 'display " "))))
+(defun lsp-hierarchy--update-icon ()
+  "Update the expander on the current row after a state transition."
+  (let ((inhibit-read-only t)
+        (pos (text-property-any (line-beginning-position) (line-end-position)
+                                'lsp-hierarchy-icon-marker t)))
+    (when pos
+      (add-text-properties pos (1+ pos)
+                           (lsp-hierarchy--icon-properties
+                            (get-text-property pos 'lsp-hierarchy-item)
+                            (get-text-property pos 'lsp-hierarchy-tree))))))
 
 ;;; Major Mode Definition
-
-(defvar lsp-hierarchy-font-lock-keywords
-  `((lsp-hierarchy--match-icon-marker 0 (lsp-hierarchy--get-icon-properties (match-beginning 0)))
-    (,lsp-hierarchy--detail-regexp 0 'lsp-hierarchy-detail-face)
-    ("(line [[:digit:]]*)" 0 'lsp-hierarchy-detail-face)
-    (lsp-hierarchy--match-node-label
-     (1 'lsp-hierarchy-node-face)
-     (3 'lsp-hierarchy-detail-face t t)))
-  "Default font-lock keywords for `lsp-hierarchy-mode'.")
 
 (defvar lsp-hierarchy-mode-map
   (let ((map (make-sparse-keymap)))
@@ -557,9 +497,7 @@ response is a leaf, whereas an error remains retryable."
   (setq-local lsp-hierarchy--file-cache (make-hash-table :test 'equal))
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t)
-  (setq-local lsp-hierarchy--nodes (make-hash-table :test 'eq))
-
-  (setq font-lock-defaults '(lsp-hierarchy-font-lock-keywords)))
+  (setq-local lsp-hierarchy--nodes (make-hash-table :test 'eq)))
 
 (defun lsp-hierarchy--display (lsp-roots source-buffer buffer-name title view-type outgoing-or-direction)
   "Display LSP-ROOTS, a list of (WORKSPACE . ITEM), in BUFFER-NAME.
@@ -581,11 +519,9 @@ OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
         (dolist (entry lsp-roots)
           (let* ((workspace (car entry))
                  (root (cdr entry))
-                 (label (if (eq view-type 'call)
-                            (lsp-render-symbol root lsp-hierarchy-detailed-outline)
-                          (lsp-get root :name)))
                  (item (lsp-hierarchy--make-node
-                        :workspace workspace :label label
+                        :workspace workspace :name (lsp-get root :name)
+                        :detail (lsp-get root :detail)
                         :kind (lsp-get root :kind)
                         :lsp-item root
                         :type 'symbol)))
@@ -724,7 +660,7 @@ ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
 						 (uri (lsp-get tar :uri))
 						 (call-uri (if outgoing parent-uri uri)))
 					    (lsp-hierarchy--make-node :workspace workspace
-								      :label (lsp-render-symbol tar lsp-hierarchy-detailed-outline)
+								      :name (lsp-get tar :name) :detail (lsp-get tar :detail)
 								      :kind (lsp-get tar :kind)
 								      :lsp-item tar
 								      :type 'symbol
@@ -809,7 +745,8 @@ ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
 			      (funcall callback
 				       (mapcar (lambda (it)
 						 (lsp-hierarchy--make-node :workspace workspace
-									   :label (concat (lsp-get it :name) (if (eq direction 'supertypes) " ↑" " ↓"))
+									   :name (lsp-get it :name) :detail (lsp-get it :detail)
+                          :annotation (if (eq direction 'supertypes) " ↑" " ↓")
 									   :kind (lsp-get it :kind)
 									   :lsp-item it
 									   :type 'symbol

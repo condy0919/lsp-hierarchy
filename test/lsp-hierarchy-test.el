@@ -135,7 +135,7 @@
       (lsp-hierarchy-mode)
       (let ((inhibit-read-only t))
         (lsp-hierarchy--insert-node
-         (lsp-hierarchy--make-node :type 'symbol :kind 12 :label label) 0 (hierarchy-new)))
+         (lsp-hierarchy--make-node :type 'symbol :kind 12 :name label) 0 (hierarchy-new)))
       (font-lock-ensure)
       (goto-char (point-min))
       (search-forward "foo")
@@ -579,6 +579,19 @@
                     (lsp-hierarchy-test--node "next")))
         (lsp-hierarchy-test--toggle "empty")
         (should (= requests (length lsp-hierarchy-test--sent)))))))
+
+(ert-deftest lsp-hierarchy-styles-structured-name-and-detail ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (let ((item (lsp-hierarchy-test--item "operator new")))
+        (lsp-put item :detail "  (size_t size)")
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) (vector item))
+        (goto-char (point-min))
+        (search-forward "operator new")
+        (should (eq (get-text-property (1- (point)) 'face) 'lsp-hierarchy-node-face))
+        (search-forward "size_t")
+        (should (eq (get-text-property (1- (point)) 'face) 'lsp-hierarchy-detail-face))
+        (should (equal (lsp-get item :name) "operator new"))))))
 
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
