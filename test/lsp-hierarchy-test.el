@@ -2341,5 +2341,43 @@
       (when (file-exists-p file) (delete-file file)))))
 
 
+(ert-deftest lsp-hierarchy-utf8-position-boundaries-without-encoding ()
+  (with-temp-buffer
+    (insert "header\n" (string #x7f #x80 #x7ff #x800 #xffff #x10000 #x10ffff) "\nend")
+    (let ((widths '(1 2 2 3 3 4 4)))
+      ;; Every byte offset is checked, including offsets inside a character
+      ;; and beyond end-of-line.  Existing behavior rounds a split unit up.
+      (dotimes (column (+ 3 (apply #'+ widths)))
+        (let ((remaining column)
+              (expected 8)
+              (rest widths))
+          (while (and (> remaining 0) rest)
+            (setq remaining (- remaining (pop rest))
+                  expected (1+ expected)))
+          (cl-letf (((symbol-function 'encode-coding-string)
+                     (lambda (&rest _) (ert-fail "Unicode positions must not invoke the encoder"))))
+            (should (= expected
+                       (lsp-hierarchy--position-to-point
+                        (lsp-make-position :line 1 :character column) "utf-8")))))))))
+
+(ert-deftest lsp-hierarchy-utf8-preserves-emacs-non-unicode-widths ()
+  (with-temp-buffer
+    (let ((chars (list #x110000 #x1fffff #x200000 #x3fff7f
+                       (unibyte-char-to-multibyte #x80)
+                       (unibyte-char-to-multibyte #xff)))
+          (column 0)
+          (expected 1))
+      (insert (apply #'string chars) "Z\n")
+      ;; Non-Unicode Emacs characters can encode to five bytes; raw byte
+      ;; characters encode to one.  A blanket four-byte rule breaks both.
+      (dolist (char chars)
+        (setq column (+ column (string-bytes (encode-coding-string (char-to-string char) 'utf-8)))
+              expected (1+ expected))
+        (should (= expected
+                   (lsp-hierarchy--position-to-point
+                    (lsp-make-position :line 0 :character column) "utf-8"))))
+      (should (looking-at-p "Z")))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

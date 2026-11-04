@@ -108,6 +108,12 @@
 - **原因**：`"utf-8"` 分支在逐字符循环中调用 `(string-bytes (encode-coding-string (char-to-string char) 'utf-8))`，每次循环都会分配单字符字符串并进行编码转换。
 - **建议**：直接根据字符码点判断 UTF-8 字节数（`<= #x7f` 为 1，`<= #x7ff` 为 2，`<= #xffff` 为 3，其余为 4），可实现零内存分配。
 
+**核查与处理（已优化）**
+
+- 问题存在，原 UTF-8 分支每经过一个字符就构造字符串并调用编码器。
+- Unicode 字符改为按码点直接计算 1–4 字节宽度。Emacs 还可保存原始字节和非 Unicode 字符，不能一律按 4 字节处理，因此仅这些少见字符保留原编码器路径。
+- 验证：覆盖各码点边界、字符中间/行尾偏移，并断言常规 Unicode 路径不调用编码器；另验证非 Unicode 字符和原始字节兼容性。110 项 ERT 全部通过。
+
 ### 3. 冗余的节点注册表 `lsp-hierarchy--view-nodes`
 - **位置**：`lsp-hierarchy--node`（L114）、`lsp-hierarchy--view`（L142）、`lsp-hierarchy--register-node`（L867-L873）
 - **原因**：每个节点都会生成 `(make-symbol "lsp-hierarchy-node")` 并通过 `lsp-hierarchy--register-node` 注册到哈希表 `lsp-hierarchy--view-nodes` 中，但 `lsp-hierarchy.el` 本体代码**没有任何地方读取**该哈希表或 `node-id`（目前仅测试辅助函数 `lsp-hierarchy-test--node` 在使用）。

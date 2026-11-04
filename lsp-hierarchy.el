@@ -971,7 +971,16 @@ with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
     (while (and (> remaining 0) (< (point) end))
       (let* ((char (char-after))
              (units (pcase encoding
-                      ("utf-8" (string-bytes (encode-coding-string (char-to-string char) 'utf-8)))
+                      ("utf-8"
+                       (cond ((<= char #x7f) 1)
+                             ((<= char #x7ff) 2)
+                             ((<= char #xffff) 3)
+                             ((<= char #x10ffff) 4)
+                             ;; Emacs can also hold raw bytes and characters
+                             ;; outside Unicode.  Keep its encoder's behavior
+                             ;; there; ordinary source text allocates nothing.
+                             (t (string-bytes
+                                 (encode-coding-string (char-to-string char) 'utf-8)))))
                       ("utf-32" 1)
                       (_ (if (> char #xffff) 2 1)))))
         (setq remaining (- remaining units))
