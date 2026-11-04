@@ -291,6 +291,200 @@
             (should (eq (plist-get request :workspace) a))
             (should (eq (plist-get params :item) item-a))))))))
 
+(ert-deftest lsp-hierarchy-prepare-uses-each-workspaces-uri-and-encoding ()
+  (lsp-hierarchy-test--with-session
+    (let ((cases '((server-utf8 "utf-8" 6)
+                   (server-utf16 "utf-16" 3)
+                   (server-utf32 "utf-32" 2))))
+      (setq lsp-hierarchy-test--workspaces
+            (mapcar
+             (lambda (entry)
+               (let ((workspace (lsp-hierarchy-test--workspace
+                                 (car entry)
+                                 (lsp-make-server-capabilities
+                                  :type-hierarchy-provider? t :positionEncoding (cadr entry))))
+                     (uri (format "custom://%s/source" (car entry))))
+                 (setf (lsp--client-path->uri-fn (lsp--workspace-client workspace))
+                       (lambda (_) uri))
+                 workspace))
+             cases))
+      (with-current-buffer lsp-hierarchy-test--source
+        (insert "head\n😀é target\ntail\n")
+        (goto-char (point-min))
+        (search-forward "é")
+        (narrow-to-region (line-beginning-position) (line-end-position))
+        ;; Buffer-local conventions cannot represent all three servers.
+        (setq-local lsp--position-column-function (lambda () 99))
+        (let ((origin (point)) (minimum (point-min)) (maximum (point-max)))
+          (lsp-hierarchy-test--show 'type)
+          (should (= origin (point)))
+          (should (= minimum (point-min)))
+          (should (= maximum (point-max)))))
+      (should (= 3 (length lsp-hierarchy-test--sent)))
+      (dolist (request lsp-hierarchy-test--sent)
+        (let* ((workspace (plist-get request :workspace))
+               (id (lsp--client-server-id (lsp--workspace-client workspace)))
+               (params (plist-get (plist-get request :body) :params)))
+          (should (equal (plist-get params :position)
+                         (list :line 1 :character (nth 2 (assq id cases)))))
+          (should (equal (plist-get (plist-get params :textDocument) :uri)
+                         (format "custom://%s/source" id))))))))
+
+(ert-deftest lsp-hierarchy-prepare-preserves-virtual-document-position ()
+  (lsp-hierarchy-test--with-session
+    (setq lsp-hierarchy-test--workspaces
+          (mapcar (lambda (id)
+                    (lsp-hierarchy-test--workspace
+                     id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
+                  '(server-a server-b)))
+    (let (view restrictions)
+      (with-current-buffer lsp-hierarchy-test--source
+        (insert "Heading\nSource block\n  target\n")
+        (goto-char (point-min))
+        (search-forward "target")
+        (narrow-to-region (line-beginning-position) (line-end-position))
+        ;; A virtual document owns its coordinates and sees its workspace.
+        (setq-local lsp--virtual-buffer
+                    (list :buffer-uri "virtual://source-block"
+                          :cur-position
+                          (lambda ()
+                            (push (buffer-narrowed-p) restrictions)
+                            (list :line 0 :character
+                                  (if (eq lsp--cur-workspace (car lsp-hierarchy-test--workspaces)) 6 9))))))
+      (dolist (refresh '(nil t))
+        (if refresh
+            (with-current-buffer view (lsp-hierarchy-refresh))
+          (setq view (lsp-hierarchy-test--show 'type)))
+        (dolist (request (seq-take lsp-hierarchy-test--sent 2))
+          (let ((params (plist-get (plist-get request :body) :params))
+                (owner (plist-get request :workspace)))
+            (should (equal (plist-get (plist-get params :textDocument) :uri) "virtual://source-block"))
+            (should (equal (plist-get params :position)
+                           (list :line 0 :character
+                                 (if (eq owner (car lsp-hierarchy-test--workspaces)) 6 9)))))
+          (lsp-hierarchy-test--reply request []))
+        ;; Initial queries preserve narrowing for virtual hooks.  Refresh
+        ;; already widens around the source marker, then restores restriction.
+        (should (equal restrictions (if refresh '(nil nil t t) '(t t))))
+        (with-current-buffer lsp-hierarchy-test--source
+          (should (buffer-narrowed-p)))))))
+
+(ert-deftest lsp-hierarchy-prepare-keeps-workspace-order-after-reversed-replies ()
+  (lsp-hierarchy-test--with-session
+    (setq lsp-hierarchy-test--workspaces
+          (mapcar (lambda (id)
+                    (lsp-hierarchy-test--workspace
+                     id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
+                  '(server-a server-b server-c)))
+    (with-current-buffer (lsp-hierarchy-test--show 'type)
+      (let ((requests (copy-sequence lsp-hierarchy-test--sent)))
+        ;; The transport records newest first, reversing dispatch order.
+        (dolist (request requests)
+          (should (eq 'loading (lsp-hierarchy--view-status lsp-hierarchy--view)))
+          (let ((id (lsp--client-server-id
+                     (lsp--workspace-client (plist-get request :workspace)))))
+            (lsp-hierarchy-test--reply request (vector (lsp-hierarchy-test--item (symbol-name id)))))))
+      (should (eq 'ready (lsp-hierarchy--view-status lsp-hierarchy--view)))
+      (should (equal (mapcar #'lsp-hierarchy--node-name (lsp-hierarchy--view-roots lsp-hierarchy--view))
+                     '("server-a" "server-b" "server-c")))
+      (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))
+
+(ert-deftest lsp-hierarchy-prepare-keeps-success-when-another-workspace-fails ()
+  (dolist (empty '(nil t))
+    (dolist (error-first '(nil t))
+      (lsp-hierarchy-test--with-session
+        (setq lsp-hierarchy-test--workspaces
+              (mapcar (lambda (id)
+                        (lsp-hierarchy-test--workspace
+                         id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
+                      '(server-a server-b)))
+        (with-current-buffer (lsp-hierarchy-test--show 'type)
+          (let* ((requests (copy-sequence lsp-hierarchy-test--sent))
+                 (failed (car requests)))
+            (dolist (request (if error-first requests (reverse requests)))
+              (should (eq 'loading (lsp-hierarchy--view-status lsp-hierarchy--view)))
+              (if (eq request failed)
+                  (lsp-hierarchy-test--reply request
+                                             (lsp-make-json-error :code -32603 :message "Unavailable") t)
+                (lsp-hierarchy-test--reply request
+                                           (unless empty (vector (lsp-hierarchy-test--item "available")))))))
+          (should (eq 'ready (lsp-hierarchy--view-status lsp-hierarchy--view)))
+          (should (string-match-p (if empty "No hierarchy found" "available") (buffer-string)))
+          (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))))
+
+(ert-deftest lsp-hierarchy-prepare-all-failures-exit-loading-and-clean-requests ()
+  (dolist (sync-failures '(nil (server-a) (server-a server-b)))
+    (lsp-hierarchy-test--with-session
+      (setq lsp-hierarchy-test--workspaces
+            (mapcar (lambda (id)
+                      (lsp-hierarchy-test--workspace
+                       id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
+                    '(server-a server-b)))
+      (cl-letf (((symbol-function 'lsp--send-no-wait)
+                 (lambda (body process)
+                   (when (and (plist-get body :id) (memq process sync-failures))
+                     (error "Send failed for %s" process))
+                   (lsp-hierarchy-test--send body process))))
+        (with-current-buffer (lsp-hierarchy-test--show 'type)
+          (dolist (request (copy-sequence lsp-hierarchy-test--sent))
+            (should (eq 'loading (lsp-hierarchy--view-status lsp-hierarchy--view)))
+            (lsp-hierarchy-test--reply request
+                                       (lsp-make-json-error :code -32603 :message "Unavailable") t))
+          (should (eq 'error (lsp-hierarchy--view-status lsp-hierarchy--view)))
+          (should (string-match-p "Unable to load hierarchy" (buffer-string)))
+          (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))
+        (should (= 0 (hash-table-count lsp--cancelable-requests)))
+        (should (= 0 (hash-table-count lsp--request-cleanup-hooks)))))))
+
+(ert-deftest lsp-hierarchy-partial-prepare-cancels-outstanding-on-close-or-refresh ()
+  (dolist (refresh '(nil t))
+    (lsp-hierarchy-test--with-session
+      (setq lsp-hierarchy-test--workspaces
+            (mapcar (lambda (id)
+                      (lsp-hierarchy-test--workspace
+                       id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
+                    '(server-a server-b)))
+      (let* ((view (lsp-hierarchy-test--show 'type))
+             (requests (copy-sequence lsp-hierarchy-test--sent))
+             (pending (cadr requests))
+             (id (plist-get (plist-get pending :body) :id))
+             (workspace (plist-get pending :workspace)))
+        (lsp-hierarchy-test--reply (car requests) (vector (lsp-hierarchy-test--item "old")))
+        (with-current-buffer view
+          (should (eq 'loading (lsp-hierarchy--view-status lsp-hierarchy--view)))
+          (if refresh (lsp-hierarchy-refresh) (kill-buffer view)))
+        (should-not (gethash id (lsp--client-response-handlers (lsp--workspace-client workspace))))
+        (should-not (gethash id lsp--request-cleanup-hooks))
+        (should (= (if refresh 2 0) (hash-table-count lsp--cancelable-requests)))
+        ;; Already queued replies must not enter the new aggregation.
+        (lsp-hierarchy-test--reply pending (vector (lsp-hierarchy-test--item "stale")))
+        (if refresh
+            (with-current-buffer view
+              (should (eq 'loading (lsp-hierarchy--view-status lsp-hierarchy--view)))
+              (dolist (request (seq-take lsp-hierarchy-test--sent 2))
+                (lsp-hierarchy-test--reply request []))
+              (should (eq 'ready (lsp-hierarchy--view-status lsp-hierarchy--view)))
+              (should (string-match-p "No hierarchy found" (buffer-string))))
+          (should-not (buffer-live-p view)))))))
+
+(ert-deftest lsp-hierarchy-partial-prepare-source-kill-exits-loading ()
+  (lsp-hierarchy-test--with-session
+    (setq lsp-hierarchy-test--workspaces
+          (mapcar (lambda (id)
+                    (lsp-hierarchy-test--workspace
+                     id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
+                  '(server-a server-b)))
+    (with-current-buffer (lsp-hierarchy-test--show 'type)
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (vector (lsp-hierarchy-test--item "partial")))
+      (kill-buffer lsp-hierarchy-test--source)
+      (should (eq 'error (lsp-hierarchy--view-status lsp-hierarchy--view)))
+      (should (string-match-p "Unable to load hierarchy" (buffer-string)))
+      (should-not (lsp-hierarchy--view-roots lsp-hierarchy--view))
+      (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))
+      (should (= 0 (hash-table-count lsp--cancelable-requests)))
+      (should (= 0 (hash-table-count lsp--request-cleanup-hooks))))))
+
 (ert-deftest lsp-hierarchy-loading-rows-are-request-local ()
   "Finishing beta first must preserve alpha's loading row, including on error."
   (dolist (errorp '(nil t))

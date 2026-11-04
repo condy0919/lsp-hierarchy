@@ -119,6 +119,8 @@ The implementation separates protocol conversion, model updates, and rendering:
 - Protocol adapters preserve the originating workspace and raw LSP item, including opaque server data. They return node data without inserting text or creating UI callbacks.
 - The renderer builds visible rows in a temporary buffer before replacing the display. Point and window positions are restored by node identity. Text properties locate model nodes; buffer indentation does not define the tree. A visible-row position index is published with the rendered text, so restoring hidden anchors only follows parent links and table lookups.
 
+Prepare queries use each server's URI handling and negotiated position encoding, with an independent request token for each server. Once all requests finish, successful results are displayed in workspace order; an empty response counts as success, and a query fails only when all servers fail. Closing the source buffer cancels preparation even after another server has replied.
+
 Automatic expansion starts sibling requests as a batch and publishes their loading rows together. Sorting and filtering are display projections: they do not reorder the model or overwrite its expansion state. Mouse actions resolve the current row through shared commands rather than retaining callbacks per node.
 
 Refresh snapshots contain path identity and presentation state, not old protocol items or request tokens. Fresh nodes always use the new response's opaque server data. Restoring expansion and restoring point are separate, so a user can stop a pending branch expansion or move away while requests finish.
@@ -140,7 +142,7 @@ make test
 
 The request tests use lsp-mode's response handlers with a controllable transport to cover stale responses, cancellation, retries, server routing, and out-of-order completion. Other tests cover folding, render batching and rollback, refresh restoration, navigation, mouse actions, source previews, sorting/filtering, point/window preservation, structured labels, Unicode positions, and source caching.
 
-CI tests hash-table and plist protocol objects in separate environments. For a local plist build, set `LSP_USE_PLISTS=true` before installing and compiling dependencies; changing it after compilation does not change generated LSP accessors.
+CI tests hash-table and plist protocol objects in separate environments, including lsp-mode 9.0.0 on the minimum supported Emacs version. For a local plist build, set `LSP_USE_PLISTS=true` before installing and compiling dependencies; changing it after compilation does not change generated LSP accessors. To test the minimum lsp-mode release locally, set `LSP_HIERARCHY_LSP_MODE_VERSION=9.0.0` for all Eask commands in a clean Eask environment.
 
 ## License
 

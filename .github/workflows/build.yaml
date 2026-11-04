@@ -17,6 +17,16 @@ jobs:
           - '30.2'
           - 'snapshot'
         lsp_objects: [hash-table, plist]
+        lsp_version: [latest]
+        include:
+          - emacs_version: '29.1'
+            lsp_objects: hash-table
+            lsp_version: '9.0.0'
+          - emacs_version: '29.1'
+            lsp_objects: plist
+            lsp_version: '9.0.0'
+    env:
+      LSP_HIERARCHY_LSP_MODE_VERSION: ${{ matrix.lsp_version }}
 
     steps:
     - uses: actions/checkout@v4
@@ -38,6 +48,17 @@ jobs:
     - name: Install dependencies
       run: |
         eask install-deps --dev
+
+    - name: Verify minimum lsp-mode release
+      if: matrix.lsp_version == '9.0.0'
+      run: |
+        eask exec emacs --batch --eval "
+          (progn
+            (require 'lisp-mnt)
+            (with-temp-buffer
+              (insert-file-contents (locate-library \"lsp-mode.el\" t))
+              (unless (equal (lm-header \"version\") \"9.0.0\")
+                (error \"Expected lsp-mode 9.0.0, got %s\" (lm-header \"version\")))))"
 
     - name: Compile
       run: |

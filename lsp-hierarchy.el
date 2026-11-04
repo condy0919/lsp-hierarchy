@@ -169,7 +169,9 @@ Filtering reveals matching ancestor paths without changing expansion state.")
   "Direction, sort order and filter of the last successful render.")
 
 (defvar-local lsp-hierarchy--row-positions nil
-  "Positions of the currently displayed node and status rows, keyed by node.")
+  "Visible nodes mapped to (NODE-ROW-START . STATUS-ROW-START).
+STATUS-ROW-START is nil unless a loading/error row is displayed.  These
+integer positions are valid only for the text published with this index.")
 
 (defvar lsp-hierarchy--render-positions nil
   "Row positions being built by the current render, before publication.")
@@ -243,11 +245,11 @@ of lsp-mode or replace requirements already supplied by the user.")
   (with-lsp-workspace workspace
     (lsp-feature? "textDocument/prepareTypeHierarchy")))
 
-(defun lsp-hierarchy--request (source method params success &optional failure token workspaces no-merge)
-  "Send METHOD and PARAMS from SOURCE for the current hierarchy view.
+(defun lsp-hierarchy--request (source workspace method params success &optional failure token cancelled)
+  "Send METHOD and PARAMS from SOURCE to WORKSPACE for the current view.
 Call SUCCESS or FAILURE at most once in the current view generation.
-TOKEN permits cancellation.  WORKSPACES restricts routing when supplied;
-NO-MERGE preserves workspace ownership of responses."
+TOKEN permits cancellation.  On cancellation, call CANCELLED if supplied,
+otherwise FAILURE, with an explanatory message."
   (let ((view (current-buffer))
         (model lsp-hierarchy--view)
         (generation (lsp-hierarchy--view-generation lsp-hierarchy--view))
@@ -256,9 +258,13 @@ NO-MERGE preserves workspace ownership of responses."
     (cl-labels ((finish (fn result)
                  (when (buffer-live-p view)
                    (with-current-buffer view
+                     ;; Model identity rejects replacement, generation rejects
+                     ;; disposal, and token membership rejects repeated replies.
                      (when (and (eq model lsp-hierarchy--view)
                                 (eq generation (lsp-hierarchy--view-generation model))
                                 (gethash token (lsp-hierarchy--view-requests lsp-hierarchy--view)))
+                       ;; Consume completion before calling code which may
+                       ;; refresh the view or start another request.
                        (remhash token (lsp-hierarchy--view-requests lsp-hierarchy--view))
                        (when fn (funcall fn result)))))))
       (condition-case err
@@ -267,17 +273,16 @@ NO-MERGE preserves workspace ownership of responses."
               (user-error "The hierarchy source buffer has been killed"))
             (with-current-buffer source
               (let ((lsp--cur-workspace nil))
-                (when (and workspaces
-                           (not (cl-every (lambda (workspace) (memq workspace (lsp-workspaces))) workspaces)))
+                (unless (memq workspace (lsp-workspaces))
                   (user-error "The hierarchy language server is no longer attached"))
-                (let ((lsp--buffer-workspaces (or workspaces (lsp-workspaces)))
+                (let ((lsp--buffer-workspaces (list workspace))
                       (lsp-method-requirements
                        (append lsp-method-requirements lsp-hierarchy--method-requirements)))
                   (lsp-request-async
-                 method params (lambda (result) (finish success result))
-                 :error-handler (lambda (error) (finish failure error))
-                 :cancel-handler (lambda () (finish failure "Request cancelled"))
-                 :cancel-token token :mode 'alive :no-merge no-merge)))))
+                   method params (lambda (result) (finish success result))
+                   :error-handler (lambda (error) (finish failure error))
+                   :cancel-handler (lambda () (finish (or cancelled failure) "Request cancelled"))
+                   :cancel-token token :mode 'alive)))))
         (error
          (lsp-hierarchy--cancel-request token)
          (finish failure err))))))
@@ -416,12 +421,13 @@ Keyboard bindings fall through to `lsp-hierarchy-mode-map', including TAB.")
         (setq val (get-text-property pos prop)))
       val)))
 
-(defun lsp-hierarchy--visible-p (node)
-  "Return non-nil if all of NODE's ancestors are expanded."
+(defun lsp-hierarchy--ancestors-expanded-p (node)
+  "Return non-nil if all of NODE's ancestors are expanded.
+This gates automatic loading, ignoring paths revealed by the display filter."
   (let ((parent (lsp-hierarchy--node-parent node)))
     (or (null parent)
         (and (lsp-hierarchy--node-expanded parent)
-             (lsp-hierarchy--visible-p parent)))))
+             (lsp-hierarchy--ancestors-expanded-p parent)))))
 
 (defun lsp-hierarchy--matching-nodes (roots)
   "Return a table of ROOTS' loaded matches and ancestors, or nil.
@@ -458,7 +464,7 @@ or asks a language server to discover more nodes."
                                   ;; on a temporary filtered-out row.
                                   (and (eq (lsp-hierarchy--node-load-state node) 'unloaded)
                                        (lsp-hierarchy--node-restore node)
-                                       (lsp-hierarchy--visible-p node)))))
+                                       (lsp-hierarchy--ancestors-expanded-p node)))))
                  (puthash node t matches)))))
         (mapc #'visit roots))
       matches)))
@@ -589,6 +595,8 @@ can insert rows anywhere above the user's current position."
                                   (lsp-hierarchy--anchor (window-start window))
                                   (lsp-hierarchy--anchor (window-point window))))
                           (get-buffer-window-list (current-buffer) nil t)))
+         ;; Copy buffer-local options; render positions and filter matches
+         ;; are shared with the temporary buffer through dynamic bindings.
          (text (with-temp-buffer
                  (setq-local lsp-hierarchy--view view
                              lsp-hierarchy-icon-close close-icon
@@ -798,7 +806,9 @@ A loading or failed branch is folded without cancelling or retrying it."
            (signal (car err) (cdr err)))))))))
 
 (defvar lsp-hierarchy--batch-loading nil
-  "Non-nil while starting a group of automatic expansion requests.")
+  "Non-nil while starting a group of automatic expansion requests.
+The dynamic binding also batches nested expansion and synchronous send errors.
+Asynchronous callbacks arriving after the binding ends redraw normally.")
 
 (defun lsp-hierarchy--render-expansion ()
   "Publish automatic expansion states without invalidating loaded data."
@@ -873,7 +883,7 @@ A loading or failed branch is folded without cancelling or retrying it."
              ;; children cached, but do not start more automatic requests.
              (when (and (eq (lsp-hierarchy--node-load-state node) 'loaded)
                         (> depth 1) (lsp-hierarchy--node-expanded node)
-                        (lsp-hierarchy--visible-p node))
+                        (lsp-hierarchy--ancestors-expanded-p node))
                (lsp-hierarchy--expand-nodes
                 (seq-filter (lambda (child) (eq (lsp-hierarchy--node-type child) 'symbol)) nodes)
                 (1- depth))))))
@@ -1204,7 +1214,7 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
                      (if direction "callHierarchy/outgoingCalls" "callHierarchy/incomingCalls")
                    (if (eq direction 'supertypes) "typeHierarchy/supertypes" "typeHierarchy/subtypes"))))
     (lsp-hierarchy--request
-     source method (list :item (lsp-hierarchy--node-lsp-item node))
+     source workspace method (list :item (lsp-hierarchy--node-lsp-item node))
      (lambda (result)
        (condition-case err
            (funcall callback
@@ -1212,7 +1222,7 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
                         (lsp-hierarchy--call-nodes result node direction)
                       (lsp-hierarchy--type-nodes result workspace direction)))
          (error (funcall error-handler err))))
-     error-handler token (list workspace))))
+     error-handler token)))
 
 (defun lsp-hierarchy--prepare-failed (err)
   "Record ERR and display a failed root request in the current view."
@@ -1220,6 +1230,49 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
         (lsp-hierarchy--view-status lsp-hierarchy--view) 'error
         (lsp-hierarchy--view-error lsp-hierarchy--view) err)
   (lsp-hierarchy--render))
+
+(defun lsp-hierarchy--prepare-requests (source method queries)
+  "Send METHOD from SOURCE for each (WORKSPACE . PARAMS) in QUERIES.
+Publish successful roots together after all requests finish.  An empty
+response is a success; report an error only if every server fails.
+Cancellation of the source ends preparation even after a partial success."
+  ;; Separate requests keep each server's cancellation token and source kill
+  ;; hook alive until its own response arrives.  lsp-mode's shared multi-server
+  ;; request can release both on the first response, before aggregation ends.
+  (let ((remaining (length queries)) responses errors done)
+    (cl-labels
+        ((cancel (err)
+           (unless done
+             (setq done t)
+             (lsp-hierarchy--prepare-failed err)))
+         (finish (workspace result failed)
+           (unless done
+             (if failed
+                 (push result errors)
+               (push (cons workspace result) responses))
+             (when (zerop (cl-decf remaining))
+               (setq done t)
+               (if (null responses)
+                   (lsp-hierarchy--prepare-failed
+                    (mapconcat #'lsp-hierarchy--error-message (nreverse errors) "; "))
+                 (condition-case err
+                     (let (roots)
+                       ;; Preserve workspace order and each server's item order,
+                       ;; independently of response arrival order.
+                       (dolist (query queries)
+                         (seq-doseq (item (cdr (assq (car query) responses)))
+                           (push (cons (car query) item) roots)))
+                       (lsp-hierarchy--display (nreverse roots)))
+                   (error (lsp-hierarchy--prepare-failed err))))))))
+      ;; Count every query before sending: a send failure can complete inline.
+      (dolist (query queries)
+        (unless done
+          (let ((workspace (car query)))
+            (lsp-hierarchy--request
+             source workspace method (cdr query)
+             (lambda (result) (finish workspace result nil))
+             (lambda (err) (finish workspace err t))
+             nil #'cancel)))))))
 
 (defun lsp-hierarchy--prepare (view-type direction &optional target restore workspace)
   "Prepare VIEW-TYPE in DIRECTION, replacing TARGET or the default view.
@@ -1239,10 +1292,21 @@ WORKSPACE, when non-nil, restricts the query to that attached server."
               (or supported
                   (user-error "%s hierarchy is not supported by the current servers"
                               (capitalize (symbol-name view-type)))))))
-         (params (if workspace
-                     (with-lsp-workspace workspace
-                       (lsp--text-document-position-params nil (lsp-hierarchy--point-to-position workspace)))
-                   (lsp--text-document-position-params)))
+         ;; Position units and URI handlers belong to each workspace, not the
+         ;; source buffer.  Validate all parameters before replacing the view.
+         (queries (mapcar
+                   (lambda (owner)
+                     (cons owner
+                           (with-lsp-workspace owner
+                             (lsp--text-document-position-params
+                              nil
+                              ;; Virtual documents own their translated positions.
+                              ;; Let their adapter see the original restriction.
+                              (or (lsp-virtual-buffer-call :cur-position)
+                                  (save-restriction
+                                    (widen)
+                                    (lsp-hierarchy--point-to-position owner)))))))
+                   workspaces))
          (name (if (eq view-type 'call) "*LSP Call Hierarchy*" "*LSP Type Hierarchy*"))
          (view (or target (get-buffer-create name)))
          (origin (copy-marker (point))))
@@ -1269,19 +1333,7 @@ WORKSPACE, when non-nil, restricts the query to that attached server."
                         (if (eq direction 'supertypes) "Supertypes" "Subtypes")))
       (lsp-hierarchy--render)
       (goto-char (point-min))
-      (lsp-hierarchy--request
-       source
-       method params
-       (lambda (responses)
-         (let (roots)
-           (dolist (response responses)
-             (seq-doseq (root (cdr response))
-               (push (cons (car response) root) roots)))
-           (condition-case err
-               (lsp-hierarchy--display (nreverse roots))
-             (error (lsp-hierarchy--prepare-failed err)))))
-       #'lsp-hierarchy--prepare-failed
-       nil workspaces t))
+      (lsp-hierarchy--prepare-requests source method queries))
     ;; Refreshing an existing view can run from `revert-buffer' in the
     ;; background.  Only opening a new query should choose a window.
     (if target view (pop-to-buffer view))))
@@ -1299,12 +1351,17 @@ WORKSPACE, when non-nil, restricts the query to that attached server."
           (and end (lsp-get end :line)) (and end (lsp-get end :character)))))
 
 (defun lsp-hierarchy--save-refresh-state ()
-  "Snapshot expansion and point without retaining old nodes or server data."
+  "Snapshot expansion and point without retaining old nodes or server data.
+Return a plist with :roots, :focus and :window-focus.  Each focus is
+(SAVED-NODE-PATH COLUMN STATUS-ROW-P), with a path from root to selection;
+:window-focus maps windows to their independent focus records."
   (let ((anchor (lsp-hierarchy--anchor (point)))
         (pending (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
         (windows (mapcar (lambda (window)
                            (cons window (lsp-hierarchy--anchor (window-point window))))
                          (get-buffer-window-list (current-buffer) nil t)))
+        ;; Focus paths identify saved occurrences by `eq', so equal siblings
+        ;; remain distinct.  Rebase replaced records after an interrupted refresh.
         (replacements (make-hash-table :test 'eq)) focus window-focus)
     (cl-labels
         ((rebase (saved-focus)
@@ -1399,7 +1456,7 @@ only unloaded nodes may start automatically, using their new protocol items."
       (dolist (node nodes)
         (when (and (lsp-hierarchy--node-restore node)
                    (lsp-hierarchy--node-expanded node)
-                   (lsp-hierarchy--visible-p node))
+                   (lsp-hierarchy--ancestors-expanded-p node))
           (if (eq (lsp-hierarchy--node-load-state node) 'unloaded)
               (progn
                 (setq started t)
