@@ -213,6 +213,10 @@ NO-MERGE preserves workspace ownership of responses."
 
 ;;; Core: Rendering Engine
 
+(defun lsp-hierarchy--single-line (text)
+  "Return TEXT with line breaks and tabs replaced for a single display row."
+  (replace-regexp-in-string "[\t\n\r]+" " " text))
+
 (defun lsp-hierarchy--insert-node (item indent)
   "Insert ITEM at INDENT using its structured name and location."
   (let ((beg (point)))
@@ -233,11 +237,12 @@ NO-MERGE preserves workspace ownership of responses."
                                'face 'lsp-hierarchy-detail-face))))
        ;; Names may contain spaces.  Style protocol fields directly instead
        ;; of parsing a formatted label back into name and signature.
-       (insert (propertize (lsp-hierarchy--node-name item) 'face 'lsp-hierarchy-node-face))
+       (insert (propertize (lsp-hierarchy--single-line (lsp-hierarchy--node-name item))
+                           'face 'lsp-hierarchy-node-face))
        (when-let* ((detail (and lsp-hierarchy-detailed-outline
                                (lsp-hierarchy--node-detail item)))
                    ((not (string-empty-p detail))))
-         (insert (propertize (concat " " (string-trim-left detail))
+         (insert (propertize (concat " " (lsp-hierarchy--single-line (string-trim-left detail)))
                              'face 'lsp-hierarchy-detail-face)))
        (when-let* ((annotation (lsp-hierarchy--node-annotation item)))
          (insert (propertize annotation 'face 'lsp-hierarchy-detail-face)))))

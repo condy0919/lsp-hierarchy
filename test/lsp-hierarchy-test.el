@@ -728,5 +728,16 @@
       (should (equal (get-text-property (point) 'display) "+")))))
 
 
+(ert-deftest lsp-hierarchy-multiline-labels-stay-on-one-row ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (let ((item (lsp-hierarchy-test--item "operator\nnew")))
+        (lsp-put item :detail "(\n int\t size)")
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) (vector item))
+        (should (= 1 (count-lines (point-min) (point-max))))
+        (should (string-match-p "operator new" (buffer-string)))
+        (should (equal (lsp-get item :name) "operator\nnew"))
+        (should (equal (lsp-get item :detail) "(\n int\t size)"))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
