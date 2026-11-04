@@ -46,14 +46,13 @@ In the hierarchy buffer:
 | `SPC` | Preview source in another window, keeping focus in the hierarchy. |
 | `n` / `p` | Move by logical lines with standard Emacs column and boundary behavior, including the final empty line. |
 | `u` | Move to the parent symbol, or from a call-site/status row to its owning symbol. |
-| Left arrow | Fold the symbol owning the current row, including call-site/status rows. Closed, unloaded, and leaf nodes stay in place without requesting children. |
 | `d` | Switch callers/callees or subtypes/supertypes at the original query position. |
 | `g` | Start a fresh query at the original position, using the initial expansion depth. |
 | `?` | Show mode help. |
 
 Click an arrow to expand or fold, a symbol or call site to visit source, or an error row to retry. Hover over a symbol or call site to see its URI and line number. The mode line shows the current hierarchy direction.
 
-Custom bindings should replace `lsp-hierarchy-smart-tab` with `lsp-hierarchy-toggle`, and `lsp-hierarchy-next-line` / `lsp-hierarchy-previous-line` with `next-logical-line` / `previous-logical-line`. Replace `lsp-hierarchy-collapse-or-parent` with `lsp-hierarchy-collapse`; use `u` for parent navigation. Sibling navigation commands and the `M-n` / `M-p` bindings have been removed.
+Custom bindings should replace `lsp-hierarchy-smart-tab` with `lsp-hierarchy-toggle`, and `lsp-hierarchy-next-line` / `lsp-hierarchy-previous-line` with `next-logical-line` / `previous-logical-line`. The independent `lsp-hierarchy-collapse-or-parent` and `lsp-hierarchy-collapse` commands and the mode's left-arrow binding have been removed; expand or fold with `TAB` or the node's arrow icon. Sibling navigation commands and the `M-n` / `M-p` bindings have also been removed.
 
 Nodes load independently and can be folded while a request is pending. Late responses are cached without reopening folded branches. Known call sites appear as soon as their node is expanded, while deeper relationships load separately. Empty nodes become leaves; an empty root response displays `No hierarchy found.` Use `g` to retry a failed root query.
 
