@@ -374,5 +374,69 @@
           (lsp-hierarchy-goto))
         (should (eq jumped (lsp-get child :selectionRange)))))))
 
+(ert-deftest lsp-hierarchy-unicode-call-site-and-narrowing ()
+  (dolist (encoding '("utf-16" "utf-8" "utf-32"))
+    (with-temp-buffer
+      (let ((source (current-buffer))
+            (workspace (lsp-hierarchy-test--workspace
+                        'encoding (lsp-make-server-capabilities :positionEncoding encoding))))
+        (insert "header\n😀foo();\nfooter\n")
+        (narrow-to-region 8 14)
+        (goto-char 9)
+        (cl-letf (((symbol-function 'find-buffer-visiting) (lambda (_) source)))
+          (with-temp-buffer
+            (lsp-hierarchy-mode)
+            (let* ((column (cond ((equal encoding "utf-16") 2)
+                                 ((equal encoding "utf-8") 4) (t 1)))
+                   (text (lsp-hierarchy--extract-line
+                          "file:///tmp/unicode.c"
+                          (lsp-hierarchy-test--range 1 column (+ column 3)) workspace))
+                   (start (text-property-any 0 (length text) 'face
+                                             'lsp-hierarchy-call-site-face text))
+                   (end (and start (next-single-property-change start 'face text))))
+              (should (equal (and start (substring-no-properties text start end)) "foo")))))
+        (should (buffer-narrowed-p))
+        (should (= (point) 9))))))
+
+(ert-deftest lsp-hierarchy-multiline-call-site-clips-to-first-line ()
+  (with-temp-buffer
+    (let ((source (current-buffer)))
+      (insert "  foo(\nbar)\n")
+      (cl-letf (((symbol-function 'find-buffer-visiting) (lambda (_) source)))
+        (with-temp-buffer
+          (lsp-hierarchy-mode)
+          (let ((text (lsp-hierarchy--extract-line
+                       "file:///tmp/multiline.c" (lsp-hierarchy-test--range 0 2 3 1))))
+            (should (equal (substring-no-properties text) "foo( (line 1)"))))))))
+
+(ert-deftest lsp-hierarchy-missing-source-file-fallback ()
+  (with-temp-buffer
+    (lsp-hierarchy-mode)
+    (should (equal (lsp-hierarchy--extract-line
+                    "file:///nonexistent/hierarchy-test.c" (lsp-hierarchy-test--range 3 0 2))
+                   "call at line 4"))))
+
+(ert-deftest lsp-hierarchy-open-file-uses-workspace-encoding-and-xref ()
+  (let ((file (make-temp-file "hierarchy-jump-" nil ".c" "head\n😀foo();\n")) target)
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((origin (current-buffer))
+                 (workspace (lsp-hierarchy-test--workspace
+                             'encoding (lsp-make-server-capabilities :positionEncoding "utf-16")))
+                 pushed jumped
+                 (xref-after-jump-hook (list (lambda () (setq jumped (current-buffer))))))
+            (setf (lsp--client-uri->path-fn (lsp--workspace-client workspace)) (lambda (_) file))
+            (setq target (find-file-noselect file))
+            (with-current-buffer target (narrow-to-region 1 5))
+            (cl-letf (((symbol-function 'xref-push-marker-stack) (lambda () (setq pushed (current-buffer))))
+                      ((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) (set-buffer buffer))))
+              (lsp-hierarchy--open-file "custom://symbol" (lsp-hierarchy-test--range 1 2 5) workspace)
+              (should (eq pushed origin))
+              (should (eq jumped target))
+              (should (looking-at-p "foo"))
+              (should-not (buffer-narrowed-p)))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (delete-file file))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

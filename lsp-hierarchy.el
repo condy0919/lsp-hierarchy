@@ -564,33 +564,57 @@ OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
 
 ;;; --- LSP Backends & Views Implementation ---
 
-(defun lsp-hierarchy--extract-line (uri range)
-  "Extract and format the code line at URI and RANGE."
-  (let* ((filename (lsp--uri-to-path uri))
-         (start (lsp-get range :start))
-         (line-n (lsp-get start :line))
-         (c-start (lsp-get start :character))
-         (end (lsp-get range :end))
-         (c-end (lsp-get end :character))
-         (get-fn (lambda ()
-                   (save-excursion
-                     (goto-char (point-min))
-                     (forward-line line-n)
-                     (let* ((beg (line-beginning-position))
-                            (ep (line-end-position))
-                            (txt (buffer-substring beg ep))
-                            (len (length txt)))
-                       (concat
-                        (string-trim-left (substring txt 0 (min c-start len)))
-                        (propertize (substring txt (min c-start len) (min c-end len))
-                                    'face 'lsp-hierarchy-call-site-face)
-                        (substring txt (min c-end len) len)
-                        (propertize (format " (line %d)" (1+ line-n)) 'face 'lsp-hierarchy-detail-face)))))))
+(defun lsp-hierarchy--position-encoding (workspace)
+  "Return WORKSPACE's negotiated position encoding, defaulting to UTF-16."
+  (or (and workspace
+           (lsp-get (lsp--workspace-server-capabilities workspace) :positionEncoding))
+      "utf-16"))
+
+(defun lsp-hierarchy--position-to-point (position encoding)
+  "Convert POSITION to a buffer point using ENCODING.
+The caller must widen the buffer.  This explicit conversion also works
+with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
+  (goto-char (point-min))
+  (forward-line (lsp-get position :line))
+  (let ((remaining (lsp-get position :character))
+        (end (line-end-position)))
+    (while (and (> remaining 0) (< (point) end))
+      (let* ((char (char-after))
+             (units (pcase encoding
+                      ("utf-8" (string-bytes (encode-coding-string (char-to-string char) 'utf-8)))
+                      ("utf-32" 1)
+                      (_ (if (> char #xffff) 2 1)))))
+        (setq remaining (- remaining units))
+        (forward-char 1)))
+    (point)))
+
+(defun lsp-hierarchy--extract-line (uri range &optional workspace)
+  "Extract the first line of RANGE at URI using WORKSPACE's position encoding."
+  (let* ((line (lsp-get (lsp-get range :start) :line))
+         (encoding (lsp-hierarchy--position-encoding workspace))
+         (read-line
+          (lambda ()
+            (save-restriction
+              (widen)
+              (save-excursion
+                (let* ((start (lsp-hierarchy--position-to-point (lsp-get range :start) encoding))
+                       (beg (line-beginning-position))
+                       (eol (line-end-position))
+                       (end (min eol (lsp-hierarchy--position-to-point (lsp-get range :end) encoding))))
+                  ;; LSP columns count encoding units, not Emacs characters.
+                  ;; Multi-line ranges only highlight their first displayed line.
+                  (concat
+                   (string-trim-left (buffer-substring-no-properties beg start))
+                   (propertize (buffer-substring-no-properties start (max start end))
+                               'face 'lsp-hierarchy-call-site-face)
+                   (buffer-substring-no-properties (max start end) eol)
+                   (propertize (format " (line %d)" (1+ line)) 'face 'lsp-hierarchy-detail-face))))))))
     (condition-case nil
-        (if-let* ((b (find-buffer-visiting filename)))
-            (with-current-buffer b (funcall get-fn))
-          (with-temp-buffer (insert-file-contents filename) (funcall get-fn)))
-      (error (format "call at line %d" (1+ line-n))))))
+        (let ((filename (with-lsp-workspace workspace (lsp--uri-to-path uri))))
+          (if-let* ((source (find-buffer-visiting filename)))
+              (with-current-buffer source (funcall read-line))
+            (with-temp-buffer (insert-file-contents filename) (funcall read-line))))
+      (error (format "call at line %d" (1+ line))))))
 
 (defun lsp-hierarchy--open-file (uri range &optional workspace)
   "Open URI at RANGE using WORKSPACE's URI handling and xref history."
@@ -601,7 +625,8 @@ OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
                      (inhibit-same-window . t)))
     (let ((target (save-restriction
                     (widen)
-                    (lsp--position-to-point (lsp-get range :start)))))
+                    (lsp-hierarchy--position-to-point
+                     (lsp-get range :start) (lsp-hierarchy--position-encoding workspace)))))
       (unless (<= (point-min) target (point-max)) (widen))
       (goto-char target))
     (run-hooks 'xref-after-jump-hook)))
@@ -632,8 +657,7 @@ ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
                              :goto-fn (lambda () (lsp-hierarchy--open-file uri (lsp-get tar :selectionRange) workspace))
                              :children (mapcar (lambda (r)
                                                  (list :id (make-symbol "lsp-hierarchy-node") :workspace workspace
-                                                       :label (with-lsp-workspace workspace
-                                                                (lsp-hierarchy--extract-line call-uri r))
+                                                       :label (lsp-hierarchy--extract-line call-uri r workspace)
                                                        :type 'code
                                                        :goto-fn (lambda () (lsp-hierarchy--open-file call-uri r workspace))))
                                                (append (lsp-get call :fromRanges) nil))
