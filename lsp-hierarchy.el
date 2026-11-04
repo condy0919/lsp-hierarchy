@@ -5,7 +5,7 @@
 ;; Author: Zhiwei Chen <condy0919@gmail.com>
 ;; Keywords: languages, tools
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (lsp-mode "9.0"))
+;; Package-Requires: ((emacs "29.1") (lsp-mode "10.0"))
 ;; Homepage: https://github.com/condy0919/lsp-hierarchy
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -140,11 +140,9 @@ independent of loading, so a response can be cached while folded."
         (request (gethash token lsp--cancelable-requests)))
     (unwind-protect
         (ignore-errors (lsp-cancel-request-by-token token))
-      ;; lsp-mode 9 can leave handlers behind when sending cancellation fails.
+      ;; lsp-mode removes the handler before notifying the server, but a send
+      ;; error skips its hook/token cleanup.
       (when request
-        (dolist (workspace (cdr request))
-          (remhash (car request)
-                   (lsp--client-response-handlers (lsp--workspace-client workspace))))
         (lsp--request-cleanup-hooks (car request))
         (remhash token lsp--cancelable-requests)))))
 
@@ -232,26 +230,19 @@ CANCELLED defaults to FAILURE; the view owns the cancellation token."
   "Move to LSP POSITION using ENCODING in the widened current buffer."
   (goto-char (point-min))
   (forward-line (lsp-get position :line))
-  (let ((remaining (lsp-get position :character)) (end (line-end-position)))
-    (while (and (> remaining 0) (< (point) end))
-      (let ((char (char-after)))
-        (cl-decf remaining
-                 (pcase encoding
-                   ("utf-8" (cond ((<= char #x7f) 1) ((<= char #x7ff) 2)
-                                  ((<= char #xffff) 3) (t 4)))
-                   ("utf-32" 1)
-                   (_ (if (> char #xffff) 2 1))))
-        (forward-char)))
-    (point)))
+  (funcall (pcase encoding
+             ("utf-8" #'lsp--move-to-utf-8-column)
+             ("utf-32" #'lsp--move-to-utf-32-column)
+             (_ #'lsp--move-to-utf-16-column))
+           (lsp-get position :character)))
 
 (defun lsp-hierarchy--point-to-position (workspace)
   "Return point as an LSP position for WORKSPACE in the widened buffer."
-  (let* ((prefix (buffer-substring-no-properties (line-beginning-position) (point)))
-         (column (pcase (lsp-hierarchy--position-encoding workspace)
-                   ("utf-8" (string-bytes (encode-coding-string prefix 'utf-8)))
-                   ("utf-32" (length prefix))
-                   (_ (cl-loop for char across prefix sum (if (> char #xffff) 2 1))))))
-    (list :line (1- (line-number-at-pos)) :character column)))
+  (list :line (1- (line-number-at-pos))
+        :character (funcall (pcase (lsp-hierarchy--position-encoding workspace)
+                              ("utf-8" #'lsp--utf-8-column)
+                              ("utf-32" #'lsp--utf-32-column)
+                              (_ #'lsp--utf-16-column)))))
 
 (defun lsp-hierarchy--source-snapshot (filename)
   "Return FILENAME's visiting buffer or a current view-owned snapshot."

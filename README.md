@@ -6,7 +6,7 @@ Explore LSP call and type hierarchies in a standard Emacs buffer.
 
 ## Installation
 
-Requires Emacs 29.1 or newer and lsp-mode 9.0 or newer.
+Requires Emacs 29.1 or newer and lsp-mode 10.0 or newer.
 
 ```elisp
 (use-package lsp-hierarchy
@@ -104,7 +104,7 @@ make test
 
 The tests use lsp-mode's response handlers with a controllable transport to exercise cancellation, stale replies, retries, server routing, and out-of-order responses. They also cover expansion, folding, navigation, source previews, Unicode positions, and source caching.
 
-CI tests hash-table and plist protocol objects in separate environments, including lsp-mode 9.0.0 on the minimum supported Emacs version. For a local plist build, set `LSP_USE_PLISTS=true` before installing and compiling dependencies; changing it after compilation does not change generated LSP accessors. To test the minimum lsp-mode release locally, set `LSP_HIERARCHY_LSP_MODE_VERSION=9.0.0` for all Eask commands in a clean Eask environment.
+CI tests hash-table and plist protocol objects in separate environments, including lsp-mode 10.0.0 on the minimum supported Emacs version. For a local plist build, set `LSP_USE_PLISTS=true` before installing and compiling dependencies; changing it after compilation does not change generated LSP accessors. To test the minimum lsp-mode release locally, set `LSP_HIERARCHY_LSP_MODE_VERSION=10.0.0` for all Eask commands in a clean Eask environment.
 
 ## License
 

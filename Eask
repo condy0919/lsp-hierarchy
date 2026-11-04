@@ -15,15 +15,15 @@
 (source 'melpa)
 
 (depends-on "emacs" "29.1")
-;; The compatibility jobs build the minimum supported release from its exact
+;; The minimum-version jobs build the supported baseline from its exact
 ;; commit; ordinary development continues to use the current archive package.
-(if (equal (getenv "LSP_HIERARCHY_LSP_MODE_VERSION") "9.0.0")
+(if (equal (getenv "LSP_HIERARCHY_LSP_MODE_VERSION") "10.0.0")
     (depends-on "lsp-mode"
                 :fetcher 'github
                 :repo "emacs-lsp/lsp-mode"
-                :commit "a478e03cd1a5dc84ad496234fd57241ff9dca57a"
+                :commit "913a6c07f163205cb568bc68d7dfe677dbc358ab"
                 :files '(:defaults "clients/*.el"))
-  (depends-on "lsp-mode" "9.0"))
+  (depends-on "lsp-mode" "10.0"))
 
 (development
  (depends-on "ert-runner")
