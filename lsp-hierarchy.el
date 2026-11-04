@@ -97,23 +97,20 @@ Zero leaves roots closed; one loads their immediate children."
 Each occurrence has independent expansion and request state, even when
 several paths lead to the same protocol item."
   (id (make-symbol "lsp-hierarchy-node"))
-  workspace lsp-item type name kind detail annotation uri range children children-fn goto-fn
+  workspace lsp-item type name kind detail annotation uri range children
   ;; Expansion is a user choice; loading can finish while a node is folded.
   expanded (load-state 'unloaded) request error)
 
-(defvar-local lsp-hierarchy--source-buffer nil
-  "The buffer from which the hierarchy was requested.")
-(defvar-local lsp-hierarchy--nodes nil
-  "Map stable occurrence IDs to nodes in this view.")
+(cl-defstruct (lsp-hierarchy--view (:constructor lsp-hierarchy--make-view))
+  "Resources and query context owned by one hierarchy buffer."
+  source kind direction
+  (generation (make-symbol "lsp-hierarchy-view"))
+  (requests (make-hash-table :test 'eq))
+  (file-cache (make-hash-table :test 'equal))
+  (nodes (make-hash-table :test 'eq)))
 
-(defvar-local lsp-hierarchy--generation nil
-  "Identity of the currently requested view, used to reject late responses.")
-
-(defvar-local lsp-hierarchy--file-cache nil
-  "Map filenames to (SIGNATURE . BUFFER) for snapshots owned by this view.")
-
-(defvar-local lsp-hierarchy--requests nil
-  "Cancellation tokens owned by the current view.")
+(defvar-local lsp-hierarchy--view nil
+  "The model and resources owned by this buffer.")
 
 (defun lsp-hierarchy--cancel-request (token)
   "Cancel TOKEN and release handlers even when sending cancellation fails."
@@ -132,15 +129,15 @@ several paths lead to the same protocol item."
 
 (defun lsp-hierarchy--dispose ()
   "Invalidate the view and cancel all of its pending requests."
-  (setq lsp-hierarchy--generation nil)
-  (when lsp-hierarchy--requests
-    (maphash (lambda (token _) (lsp-hierarchy--cancel-request token)) lsp-hierarchy--requests)
-    (clrhash lsp-hierarchy--requests))
-  (when lsp-hierarchy--file-cache
+  (setf (lsp-hierarchy--view-generation lsp-hierarchy--view) nil)
+  (when (lsp-hierarchy--view-requests lsp-hierarchy--view)
+    (maphash (lambda (token _) (lsp-hierarchy--cancel-request token)) (lsp-hierarchy--view-requests lsp-hierarchy--view))
+    (clrhash (lsp-hierarchy--view-requests lsp-hierarchy--view)))
+  (when (lsp-hierarchy--view-file-cache lsp-hierarchy--view)
     (maphash (lambda (_ entry)
                (when (buffer-live-p (cdr entry)) (kill-buffer (cdr entry))))
-             lsp-hierarchy--file-cache)
-    (clrhash lsp-hierarchy--file-cache)))
+             (lsp-hierarchy--view-file-cache lsp-hierarchy--view))
+    (clrhash (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
 
 (defun lsp-hierarchy--error-message (err)
   "Format a protocol error, Lisp condition or string ERR."
@@ -181,15 +178,15 @@ Call SUCCESS or FAILURE at most once in the current view generation.
 TOKEN permits cancellation.  WORKSPACES restricts routing when supplied;
 NO-MERGE preserves workspace ownership of responses."
   (let ((view (current-buffer))
-        (generation lsp-hierarchy--generation)
+        (generation (lsp-hierarchy--view-generation lsp-hierarchy--view))
         (token (or token (make-symbol "lsp-hierarchy-request"))))
-    (puthash token t lsp-hierarchy--requests)
+    (puthash token t (lsp-hierarchy--view-requests lsp-hierarchy--view))
     (cl-labels ((finish (fn result)
                  (when (buffer-live-p view)
                    (with-current-buffer view
-                     (when (and (eq generation lsp-hierarchy--generation)
-                                (gethash token lsp-hierarchy--requests))
-                       (remhash token lsp-hierarchy--requests)
+                     (when (and (eq generation (lsp-hierarchy--view-generation lsp-hierarchy--view))
+                                (gethash token (lsp-hierarchy--view-requests lsp-hierarchy--view)))
+                       (remhash token (lsp-hierarchy--view-requests lsp-hierarchy--view))
                        (when fn (funcall fn result)))))))
       (condition-case err
           (progn
@@ -294,7 +291,7 @@ response is a leaf, whereas an error remains retryable."
   (and node
        (eq (lsp-hierarchy--node-type node) 'symbol)
        (or (and (not (eq (lsp-hierarchy--node-load-state node) 'loaded))
-                (lsp-hierarchy--node-children-fn node))
+                (eq (lsp-hierarchy--node-type node) 'symbol))
            (lsp-hierarchy--node-children node)
            (hierarchy-children hierarchy (lsp-hierarchy--node-id node)))))
 
@@ -304,7 +301,7 @@ response is a leaf, whereas an error remains retryable."
   (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
          (h (lsp-hierarchy--get-prop 'lsp-hierarchy-tree))
          (indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent))
-         (cfn (and item (lsp-hierarchy--node-children-fn item))))
+)
     (unless item
       (user-error "No node here"))
     (if (not (lsp-hierarchy--expandable-p item h))
@@ -322,15 +319,14 @@ response is a leaf, whereas an error remains retryable."
               (setf (lsp-hierarchy--node-expanded item) t)))
           (lsp-hierarchy--update-icon)))
 
-       (cfn
+       ((eq (lsp-hierarchy--node-type item) 'symbol)
         (lsp-hierarchy--load-async item indent h))))))
 
 (defun lsp-hierarchy--load-async (item indent hierarchy &optional depth)
   "Load ITEM at INDENT in HIERARCHY, expanding up to DEPTH levels."
   (let* ((depth (or depth 1))
-         (cfn (and item (lsp-hierarchy--node-children-fn item)))
          (precomputed (lsp-hierarchy--node-children item))
-         (source lsp-hierarchy--source-buffer)
+         (source (lsp-hierarchy--view-source lsp-hierarchy--view))
          (origin (copy-marker (line-beginning-position) t))
          (marker (copy-marker (line-beginning-position 2)))
          (token (make-symbol "lsp-hierarchy-node-request"))
@@ -384,10 +380,10 @@ response is a leaf, whereas an error remains retryable."
                    (goto-char marker)
                    (dolist (child (append precomputed children))
                      (hierarchy-add-tree hierarchy (lsp-hierarchy--node-id child) (lambda (_) (lsp-hierarchy--node-id item)))
-                     (puthash (lsp-hierarchy--node-id child) child lsp-hierarchy--nodes)
+                     (puthash (lsp-hierarchy--node-id child) child (lsp-hierarchy--view-nodes lsp-hierarchy--view))
                      (let ((start (point)))
                        (lsp-hierarchy--insert-node child (1+ indent) hierarchy)
-                       (when (and (> depth 1) (lsp-hierarchy--node-children-fn child))
+                       (when (and (> depth 1) (eq (lsp-hierarchy--node-type child) 'symbol))
                          (push (cons child (copy-marker start t)) expand))))
                    (setf (lsp-hierarchy--node-load-state item) 'loaded)
                    (goto-char origin)
@@ -409,17 +405,18 @@ response is a leaf, whereas an error remains retryable."
       ;; Send-time exceptions and asynchronous failures take the same path;
       ;; neither is a successful empty result and both must allow retrying.
       (condition-case err
-          (if cfn (funcall cfn item source #'succeed #'fail token) (succeed nil))
+          (lsp-hierarchy--fetch-children item source #'succeed #'fail token)
         (error (fail err))))))
 
 (defun lsp-hierarchy-goto ()
-  "Jump to the source location of the item at point."
+  "Jump to the source location of the node at point."
   (interactive)
-  (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
-         (goto-fn (and item (lsp-hierarchy--node-goto-fn item))))
-    (if goto-fn
-        (funcall goto-fn)
-      (user-error "No location for this node"))))
+  (let ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
+    (unless (and node (lsp-hierarchy--node-uri node) (lsp-hierarchy--node-range node))
+      (user-error "No location for this node"))
+    (lsp-hierarchy--open-file (lsp-hierarchy--node-uri node)
+                              (lsp-hierarchy--node-range node)
+                              (lsp-hierarchy--node-workspace node))))
 
 (defun lsp-hierarchy-smart-tab ()
   "Smart TAB command for `lsp-hierarchy-mode'."
@@ -492,12 +489,9 @@ response is a leaf, whereas an error remains retryable."
   (setq-local indent-tabs-mode nil)
   (setq-local truncate-lines t)
 
-  (setq-local lsp-hierarchy--generation (make-symbol "lsp-hierarchy-view"))
-  (setq-local lsp-hierarchy--requests (make-hash-table :test 'eq))
-  (setq-local lsp-hierarchy--file-cache (make-hash-table :test 'equal))
+  (setq-local lsp-hierarchy--view (lsp-hierarchy--make-view))
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
-  (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t)
-  (setq-local lsp-hierarchy--nodes (make-hash-table :test 'eq)))
+  (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t))
 
 (defun lsp-hierarchy--display (lsp-roots source-buffer buffer-name title view-type outgoing-or-direction)
   "Display LSP-ROOTS, a list of (WORKSPACE . ITEM), in BUFFER-NAME.
@@ -512,37 +506,19 @@ OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
       (let ((inhibit-read-only t))
         (erase-buffer)
         (lsp-hierarchy-mode)
-        (setq-local lsp-hierarchy--source-buffer source-buffer)
+        (setf (lsp-hierarchy--view-source lsp-hierarchy--view) source-buffer
+              (lsp-hierarchy--view-kind lsp-hierarchy--view) view-type
+              (lsp-hierarchy--view-direction lsp-hierarchy--view) outgoing-or-direction)
         (setq mode-name title)
         ;; Root entries retain the workspace that produced each protocol item.
         ;; Opaque item data must never be resolved by a different server.
         (dolist (entry lsp-roots)
-          (let* ((workspace (car entry))
-                 (root (cdr entry))
-                 (item (lsp-hierarchy--make-node
-                        :workspace workspace :name (lsp-get root :name)
-                        :detail (lsp-get root :detail)
-                        :kind (lsp-get root :kind)
-                        :lsp-item root
-                        :type 'symbol)))
-            (setf (lsp-hierarchy--node-children-fn item)
-                  (if (eq view-type 'call)
-                      (lambda (it s cb err token)
-                        (lsp-hierarchy--call-hierarchy-children it s cb outgoing-or-direction err token))
-                    (lambda (it s cb err token)
-                      (lsp-hierarchy--type-hierarchy-children it s cb outgoing-or-direction err token))))
-            ;; selectionRange identifies the symbol name; range may also
-            ;; include its documentation and body.  Roots are navigable in
-            ;; both call and type views.
-            (setf (lsp-hierarchy--node-goto-fn item)
-                  (lambda () (lsp-hierarchy--open-file
-                              (lsp-get root :uri) (lsp-get root :selectionRange) workspace)))
-
+          (let ((item (lsp-hierarchy--symbol-node (cdr entry) (car entry))))
             ;; hierarchy.el uses equal keys.  Stable IDs keep mutable node
             ;; state out of its relation keys.
             (hierarchy-add-tree h (lsp-hierarchy--node-id item) nil)
             (setf (lsp-hierarchy--node-expanded item) nil)
-            (puthash (lsp-hierarchy--node-id item) item lsp-hierarchy--nodes)
+            (puthash (lsp-hierarchy--node-id item) item (lsp-hierarchy--view-nodes lsp-hierarchy--view))
             (let ((start (point)))
               (lsp-hierarchy--insert-node item 0 h)
               (push (cons item (copy-marker start t)) initial-nodes)))))
@@ -588,10 +564,10 @@ with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
       (let* ((attrs (file-attributes filename))
              (signature (list (file-attribute-modification-time attrs)
                               (file-attribute-size attrs)))
-             (entry (gethash filename lsp-hierarchy--file-cache)))
+             (entry (gethash filename (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
         (unless (and entry (buffer-live-p (cdr entry)))
           (setq entry (cons nil (generate-new-buffer " *lsp-hierarchy-source*")))
-          (puthash filename entry lsp-hierarchy--file-cache))
+          (puthash filename entry (lsp-hierarchy--view-file-cache lsp-hierarchy--view)))
         (unless (equal (car entry) signature)
           (with-current-buffer (cdr entry)
             (erase-buffer)
@@ -641,40 +617,63 @@ with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
       (goto-char target))
     (run-hooks 'xref-after-jump-hook)))
 
-(defun lsp-hierarchy--call-hierarchy-children (item sb callback outgoing &optional error-handler token)
-  "Fetch children for call hierarchy ITEM.
-SB is the source buffer.  CALLBACK is called with the results.
-OUTGOING is non-nil for outgoing calls.
-ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
-  (let* ((method (if outgoing "callHierarchy/outgoingCalls" "callHierarchy/incomingCalls"))
-         (lsp-p (lsp-hierarchy--node-lsp-item item))
-         (parent-uri (lsp-get lsp-p :uri))
-         (workspace (lsp-hierarchy--node-workspace item)))
-    (lsp-hierarchy--request sb
-			    method (list :item lsp-p)
-			    (lambda (res)
-			      (funcall callback
-				       (mapcar
-					(lambda (call)
-					  (let* ((tar (if outgoing (lsp:call-hierarchy-outgoing-call-to call) (lsp:call-hierarchy-incoming-call-from call)))
-						 (uri (lsp-get tar :uri))
-						 (call-uri (if outgoing parent-uri uri)))
-					    (lsp-hierarchy--make-node :workspace workspace
-								      :name (lsp-get tar :name) :detail (lsp-get tar :detail)
-								      :kind (lsp-get tar :kind)
-								      :lsp-item tar
-								      :type 'symbol
-								      :goto-fn (lambda () (lsp-hierarchy--open-file uri (lsp-get tar :selectionRange) workspace))
-								      :children (mapcar (lambda (r)
-											  (lsp-hierarchy--make-node :workspace workspace
-														    :uri call-uri :range r
-														    :type 'code
-														    :goto-fn (lambda () (lsp-hierarchy--open-file call-uri r workspace))))
-											(append (lsp-get call :fromRanges) nil))
-								      :children-fn (lambda (it s cb err token)
-										     (lsp-hierarchy--call-hierarchy-children it s cb outgoing err token)))))
-					res)))
-			    error-handler token (list workspace))))
+(defun lsp-hierarchy--symbol-node (item workspace &optional annotation)
+  "Describe one occurrence of protocol ITEM owned by WORKSPACE.
+ANNOTATION is optional view text.  Keep ITEM intact, including opaque data;
+selectionRange identifies the name rather than its whole declaration."
+  (lsp-hierarchy--make-node
+   :workspace workspace :lsp-item item :type 'symbol
+   :name (lsp-get item :name) :kind (lsp-get item :kind)
+   :detail (lsp-get item :detail) :annotation annotation
+   :uri (lsp-get item :uri) :range (lsp-get item :selectionRange)))
+
+(defun lsp-hierarchy--call-nodes (calls parent outgoing)
+  "Convert CALLS under PARENT to nodes in the OUTGOING direction.
+This conversion only describes data; it never reads files or changes a view."
+  (let ((workspace (lsp-hierarchy--node-workspace parent)))
+    (mapcar
+     (lambda (call)
+       (let* ((item (if outgoing (lsp:call-hierarchy-outgoing-call-to call)
+                      (lsp:call-hierarchy-incoming-call-from call)))
+              (node (lsp-hierarchy--symbol-node item workspace))
+              ;; fromRanges belong to the caller, i.e. the parent for
+              ;; outgoing calls and the returned item for incoming calls.
+              (uri (if outgoing (lsp-hierarchy--node-uri parent) (lsp-get item :uri))))
+         (setf (lsp-hierarchy--node-children node)
+               (mapcar (lambda (range)
+                         (lsp-hierarchy--make-node
+                          :workspace workspace :type 'code :uri uri :range range))
+                       (append (lsp-get call :fromRanges) nil)))
+         node))
+     calls)))
+
+(defun lsp-hierarchy--type-nodes (items workspace direction)
+  "Convert protocol ITEMS from WORKSPACE in DIRECTION to nodes."
+  (mapcar (lambda (item)
+            (lsp-hierarchy--symbol-node item workspace
+                                        (if (eq direction 'supertypes) " ↑" " ↓")))
+          items))
+
+(defun lsp-hierarchy--fetch-children (node source callback error-handler token)
+  "Request NODE's children from SOURCE using the current view's query.
+Pass normalized nodes to CALLBACK, errors to ERROR-HANDLER; TOKEN owns the
+request.  Only this adapter knows which hierarchy protocol methods to use."
+  (let* ((kind (lsp-hierarchy--view-kind lsp-hierarchy--view))
+         (direction (lsp-hierarchy--view-direction lsp-hierarchy--view))
+         (workspace (lsp-hierarchy--node-workspace node))
+         (method (if (eq kind 'call)
+                     (if direction "callHierarchy/outgoingCalls" "callHierarchy/incomingCalls")
+                   (if (eq direction 'supertypes) "typeHierarchy/supertypes" "typeHierarchy/subtypes"))))
+    (lsp-hierarchy--request
+     source method (list :item (lsp-hierarchy--node-lsp-item node))
+     (lambda (result)
+       (condition-case err
+           (funcall callback
+                    (if (eq kind 'call)
+                        (lsp-hierarchy--call-nodes result node direction)
+                      (lsp-hierarchy--type-nodes result workspace direction)))
+         (error (funcall error-handler err))))
+     error-handler token (list workspace))))
 
 (defun lsp-hierarchy--prepare (view-type direction)
   "Prepare VIEW-TYPE in DIRECTION, keeping only the latest requested view."
@@ -731,30 +730,7 @@ show supertypes.  Otherwise, show subtypes."
   (interactive "P")
   (lsp-hierarchy--prepare 'type (if super 'supertypes 'subtypes)))
 
-(defun lsp-hierarchy--type-hierarchy-children (item sb callback direction &optional error-handler token)
-  "Fetch children for type hierarchy ITEM.
-SB is the source buffer.  CALLBACK is called with the results.
-DIRECTION is \='supertypes or \='subtypes.
-ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
-  (let ((method (if (eq direction 'supertypes) "typeHierarchy/supertypes" "typeHierarchy/subtypes"))
-        (lsp-it (lsp-hierarchy--node-lsp-item item))
-        (workspace (lsp-hierarchy--node-workspace item)))
-    (lsp-hierarchy--request sb
-			    method (list :item lsp-it)
-			    (lambda (res)
-			      (funcall callback
-				       (mapcar (lambda (it)
-						 (lsp-hierarchy--make-node :workspace workspace
-									   :name (lsp-get it :name) :detail (lsp-get it :detail)
-                          :annotation (if (eq direction 'supertypes) " ↑" " ↓")
-									   :kind (lsp-get it :kind)
-									   :lsp-item it
-									   :type 'symbol
-									   :goto-fn (lambda () (lsp-hierarchy--open-file (lsp-get it :uri) (lsp-get it :selectionRange) workspace))
-									   :children-fn (lambda (it sb cb err token)
-											  (lsp-hierarchy--type-hierarchy-children it sb cb direction err token))))
-					       res)))
-			    error-handler token (list workspace))))
+
 
 (provide 'lsp-hierarchy)
 ;;; lsp-hierarchy.el ends here

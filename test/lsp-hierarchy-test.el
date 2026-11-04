@@ -126,7 +126,7 @@
   (with-temp-buffer
     (lsp-hierarchy-mode)
     (should (eq major-mode 'lsp-hierarchy-mode))
-    (should (bound-and-true-p lsp-hierarchy--nodes))))
+    (should (lsp-hierarchy--view-p lsp-hierarchy--view))))
 
 (ert-deftest lsp-hierarchy-fontify-bare-symbol-test ()
   "A symbol without a detail field must fontify without an exception."
@@ -190,7 +190,7 @@
         (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) nil)
         (should (eq (lsp-hierarchy--node-load-state root) 'loaded))
         (should-not (eq (lsp-hierarchy--node-load-state root) 'loading))
-        (should (= 0 (hash-table-count lsp-hierarchy--requests)))))))
+        (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))))))
 
 (ert-deftest lsp-hierarchy-send-error-is-retryable ()
   (lsp-hierarchy-test--with-session
@@ -199,7 +199,7 @@
       (cl-letf (((symbol-function 'lsp--send-no-wait) (lambda (&rest _) (error "Send failed"))))
         (lsp-hierarchy-test--toggle "root"))
       (should (not (eq (lsp-hierarchy--node-load-state (lsp-hierarchy-test--node "root")) 'loading)))
-      (should (= 0 (hash-table-count lsp-hierarchy--requests)))
+      (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))
       (should (= 0 (hash-table-count lsp--cancelable-requests)))
       (should (= 0 (hash-table-count lsp--request-cleanup-hooks)))
       (should-not (string-match-p "Loading" (buffer-string))))))
@@ -211,7 +211,7 @@
       (lsp-hierarchy-test--toggle "root")
       (kill-buffer lsp-hierarchy-test--source)
       (should (not (eq (lsp-hierarchy--node-load-state (lsp-hierarchy-test--node "root")) 'loading)))
-      (should (= 0 (hash-table-count lsp-hierarchy--requests)))
+      (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))
       (lsp-hierarchy-test--toggle "root")
       (should (not (eq (lsp-hierarchy--node-load-state (lsp-hierarchy-test--node "root")) 'loading))))))
 
@@ -272,8 +272,8 @@
           (dolist (request requests)
             (lsp-hierarchy-test--reply
              request (vector (if (eq a (plist-get request :workspace)) item-a item-b)))))
-        (should (= (hash-table-count lsp-hierarchy--nodes) 2))
-        (let* ((nodes (hash-table-values lsp-hierarchy--nodes))
+        (should (= (hash-table-count (lsp-hierarchy--view-nodes lsp-hierarchy--view)) 2))
+        (let* ((nodes (hash-table-values (lsp-hierarchy--view-nodes lsp-hierarchy--view)))
                (node-a (seq-find (lambda (node) (eq (lsp-hierarchy--node-workspace node) a)) nodes))
                (node-b (seq-find (lambda (node) (eq (lsp-hierarchy--node-workspace node) b)) nodes)))
           (should-not (eq (lsp-hierarchy--node-id node-a) (lsp-hierarchy--node-id node-b)))
@@ -534,10 +534,10 @@
                 (lsp-hierarchy-test--toggle "caller")
                 (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) nil)
                 (should (= reads 1))
-                (should (= 1 (hash-table-count lsp-hierarchy--file-cache)))
+                (should (= 1 (hash-table-count (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
                 (font-lock-ensure)
                 (should (string-match-p "foo();" (buffer-string)))
-                (let ((snapshot (cdr (gethash file lsp-hierarchy--file-cache))))
+                (let ((snapshot (cdr (gethash file (lsp-hierarchy--view-file-cache lsp-hierarchy--view)))))
                   (kill-buffer (current-buffer))
                   (should-not (buffer-live-p snapshot)))))))
       (delete-file file))))
@@ -592,6 +592,24 @@
         (search-forward "size_t")
         (should (eq (get-text-property (1- (point)) 'face) 'lsp-hierarchy-detail-face))
         (should (equal (lsp-get item :name) "operator new"))))))
+
+(ert-deftest lsp-hierarchy-normalizes-call-edge-locations ()
+  (let* ((workspace (lsp-hierarchy-test--workspace 'server))
+         (parent (lsp-hierarchy--symbol-node
+                  (lsp-hierarchy-test--item "parent" "file:///parent.c") workspace))
+         (item (lsp-hierarchy-test--item "child" "file:///child.c" '(opaque)))
+         (range (lsp-hierarchy-test--range 0 1 4)))
+    (dolist (outgoing '(nil t))
+      (let* ((call (if outgoing
+                       (lsp-make-call-hierarchy-outgoing-call :to item :from-ranges (vector range))
+                     (lsp-make-call-hierarchy-incoming-call :from item :from-ranges (vector range))))
+             (node (car (lsp-hierarchy--call-nodes (vector call) parent outgoing)))
+             (site (car (lsp-hierarchy--node-children node))))
+        (should (eq (lsp-hierarchy--node-lsp-item node) item))
+        (should (eq (lsp-hierarchy--node-workspace node) workspace))
+        (should (eq (lsp-hierarchy--node-range site) range))
+        (should (equal (lsp-hierarchy--node-uri site)
+                       (if outgoing "file:///parent.c" "file:///child.c")))))))
 
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
