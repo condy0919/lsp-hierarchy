@@ -90,16 +90,11 @@
    :from (lsp-hierarchy-test--item name uri) :from-ranges (or ranges [])))
 
 (defun lsp-hierarchy-test--node (name)
-  "Find the node with NAME in the current view."
-  (save-excursion
-    (goto-char (point-min))
-    (let (found)
-      (while (and (not found) (not (eobp)))
-        (let* ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
-               (item (and node (lsp-hierarchy--node-lsp-item node))))
-          (when (and item (equal name (lsp-get item :name))) (setq found node)))
-        (forward-line 1))
-      (or found (ert-fail (format "Missing node %s" name))))))
+  "Find a model node with NAME, whether or not its row is visible."
+  (or (seq-find (lambda (node)
+                  (equal name (lsp-hierarchy--node-name node)))
+                (hash-table-values (lsp-hierarchy--view-nodes lsp-hierarchy--view)))
+      (ert-fail (format "Missing node %s" name))))
 
 (defun lsp-hierarchy-test--toggle (name)
   "Toggle the node with NAME in the current view."
@@ -135,7 +130,7 @@
       (lsp-hierarchy-mode)
       (let ((inhibit-read-only t))
         (lsp-hierarchy--insert-node
-         (lsp-hierarchy--make-node :type 'symbol :kind 12 :name label) 0 (hierarchy-new)))
+         (lsp-hierarchy--make-node :type 'symbol :kind 12 :name label) 0))
       (font-lock-ensure)
       (goto-char (point-min))
       (search-forward "foo")
@@ -604,12 +599,35 @@
                        (lsp-make-call-hierarchy-outgoing-call :to item :from-ranges (vector range))
                      (lsp-make-call-hierarchy-incoming-call :from item :from-ranges (vector range))))
              (node (car (lsp-hierarchy--call-nodes (vector call) parent outgoing)))
-             (site (car (lsp-hierarchy--node-children node))))
+             (site (car (lsp-hierarchy--node-call-sites node))))
         (should (eq (lsp-hierarchy--node-lsp-item node) item))
         (should (eq (lsp-hierarchy--node-workspace node) workspace))
         (should (eq (lsp-hierarchy--node-range site) range))
         (should (equal (lsp-hierarchy--node-uri site)
                        (if outgoing "file:///parent.c" "file:///child.c")))))))
+
+(ert-deftest lsp-hierarchy-shared-symbol-has-independent-occurrences ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "a" "b")
+      (let ((item (lsp-hierarchy-test--item "shared")))
+        (dolist (name '("a" "b"))
+          (lsp-hierarchy-test--toggle name)
+          (lsp-hierarchy-test--reply
+           (car lsp-hierarchy-test--sent)
+           (vector (lsp-make-call-hierarchy-incoming-call :from item :from-ranges [])))))
+      (let* ((a (lsp-hierarchy-test--node "a"))
+             (b (lsp-hierarchy-test--node "b"))
+             (a-child (car (lsp-hierarchy--node-children a)))
+             (b-child (car (lsp-hierarchy--node-children b))))
+        (should (eq (lsp-hierarchy--node-parent a-child) a))
+        (should (eq (lsp-hierarchy--node-parent b-child) b))
+        (should-not (eq (lsp-hierarchy--node-id a-child) (lsp-hierarchy--node-id b-child)))
+        (goto-char (lsp-hierarchy-test--node-position a-child))
+        (lsp-hierarchy-toggle)
+        (should (eq (lsp-hierarchy--node-load-state a-child) 'loading))
+        (should (eq (lsp-hierarchy--node-load-state b-child) 'unloaded))
+        (should-not (lsp-hierarchy--node-expanded b-child))))))
 
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
