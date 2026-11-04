@@ -401,6 +401,19 @@ An empty successful response is a leaf; an error remains retryable."
            (setf (lsp-hierarchy--node-expanded node) expanded)
            (signal (car err) (cdr err)))))))))
 
+(defvar lsp-hierarchy--batch-loading nil
+  "Non-nil while starting a group of automatic expansion requests.")
+
+(defun lsp-hierarchy--expand-nodes (nodes depth)
+  "Start expansion of NODES to DEPTH and publish their loading states together."
+  (when nodes
+    ;; Sending a request can also fail synchronously.  Both loading and error
+    ;; rows are published once after the batch, instead of once per sibling.
+    (let ((lsp-hierarchy--batch-loading t))
+      (dolist (node nodes)
+        (lsp-hierarchy--load-async node depth)))
+    (unless lsp-hierarchy--batch-loading (lsp-hierarchy--render))))
+
 (defun lsp-hierarchy--load-async (node &optional depth)
   "Load NODE's children, automatically expanding at most DEPTH levels."
   (let ((depth (or depth 1))
@@ -414,7 +427,7 @@ An empty successful response is a leaf; an error remains retryable."
            (setf (lsp-hierarchy--node-request node) nil
                  (lsp-hierarchy--node-load-state node) 'error
                  (lsp-hierarchy--node-error node) err)
-           (lsp-hierarchy--render)
+           (unless lsp-hierarchy--batch-loading (lsp-hierarchy--render))
            (message "LSP hierarchy: %s (TAB to retry)" (lsp-hierarchy--error-message err)))
          (succeed (children)
            (let ((previous (lsp-hierarchy--node-children node))
@@ -440,12 +453,12 @@ An empty successful response is a leaf; an error remains retryable."
              (when (and (eq (lsp-hierarchy--node-load-state node) 'loaded)
                         (> depth 1) (lsp-hierarchy--node-expanded node)
                         (lsp-hierarchy--visible-p node))
-               (dolist (child nodes)
-                 (when (eq (lsp-hierarchy--node-type child) 'symbol)
-                   (lsp-hierarchy--load-async child (1- depth))))))))
+               (lsp-hierarchy--expand-nodes
+                (seq-filter (lambda (child) (eq (lsp-hierarchy--node-type child) 'symbol)) nodes)
+                (1- depth))))))
       (condition-case err
           (progn
-            (lsp-hierarchy--render)
+            (unless lsp-hierarchy--batch-loading (lsp-hierarchy--render))
             (lsp-hierarchy--fetch-children
              node (lsp-hierarchy--view-source lsp-hierarchy--view) #'succeed #'fail token))
         (error (fail err))))))
@@ -525,8 +538,7 @@ An empty successful response is a leaf; an error remains retryable."
       (puthash (lsp-hierarchy--node-id node) node
                (lsp-hierarchy--view-nodes lsp-hierarchy--view)))
     (when (> lsp-hierarchy-expand-depth 0)
-      (dolist (node nodes)
-        (lsp-hierarchy--load-async node lsp-hierarchy-expand-depth)))))
+      (lsp-hierarchy--expand-nodes nodes lsp-hierarchy-expand-depth))))
 
 ;;; --- LSP Backends & Views Implementation ---
 

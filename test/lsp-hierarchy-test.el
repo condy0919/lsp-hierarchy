@@ -829,5 +829,32 @@
       (should-error (lsp-hierarchy-refresh) :type 'user-error)
       (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))
 
+(ert-deftest lsp-hierarchy-auto-expansion-batches-loading-rows ()
+  (lsp-hierarchy-test--with-session
+    (let ((lsp-hierarchy-expand-depth 2))
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (lsp-hierarchy-test--roots "root")
+        (let ((render (symbol-function 'lsp-hierarchy--render)) (renders 0))
+          (cl-letf (((symbol-function 'lsp-hierarchy--render)
+                     (lambda () (cl-incf renders) (funcall render))))
+            (lsp-hierarchy-test--reply
+             (car lsp-hierarchy-test--sent)
+             (vconcat (cl-loop for index below 50
+                              collect (lsp-hierarchy-test--call (format "child-%d" index))))))
+          ;; Publish the response, then all automatic loading rows together.
+          (should (<= renders 2))
+          (should (= 50 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))
+          (should (= 50 (how-many "Loading" (point-min) (point-max)))))))))
+
+(ert-deftest lsp-hierarchy-batched-expansion-publishes-send-errors ()
+  (lsp-hierarchy-test--with-session
+    (let ((lsp-hierarchy-expand-depth 1))
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (cl-letf (((symbol-function 'lsp--send-no-wait)
+                   (lambda (&rest _) (error "Unavailable"))))
+          (lsp-hierarchy-test--roots "a" "b"))
+        (should (= 2 (how-many "Unavailable.*TAB" (point-min) (point-max))))
+        (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
