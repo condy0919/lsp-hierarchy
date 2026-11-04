@@ -656,7 +656,7 @@ can insert rows anywhere above the user's current position."
 
 (defun lsp-hierarchy-filter (regexp)
   "Show loaded symbols matching REGEXP and their ancestor paths.
-Match symbol names and details.  Empty REGEXP clears the filter and
+Match displayed names and enabled details.  Empty REGEXP clears the filter and
 restores the model's folding state.  While filtering, matching paths remain
 visible even when their underlying nodes are folded.  No language-server
 requests are sent."

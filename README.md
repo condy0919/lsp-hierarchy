@@ -62,7 +62,7 @@ You can bind the primary commands to your preferred keys or add them to the `lsp
 | `g` | Refresh while restoring matching branches and the selected location. |
 | `C-u g` | Refresh with the initial expansion depth, discarding saved tree state. |
 | `s` | Cycle through server order, name order, and source location order. |
-| `/` | Filter loaded symbol names and details by regexp; empty input clears the filter. |
+| `/` | Filter displayed names and enabled details of loaded symbols by regexp; empty input clears the filter. |
 | `?` | Show mode help. |
 
 The header shows the current hierarchy direction, sort order, and active filter throughout loading and refresh.
@@ -71,9 +71,9 @@ Click an arrow to expand or fold, a symbol name or call site to visit source, or
 
 Nodes can be folded while loading. Known call sites appear immediately on expansion, while deeper relationships load independently. A response arriving under a folded node is cached without reopening it. A node with no child symbols or call sites becomes a leaf and loses its expansion arrow; an empty root result displays `No hierarchy found.` If the initial request fails, use `g` to retry.
 
-Refresh repeats the query at its original source marker and in the same direction. The marker follows edits; moving point elsewhere in the source buffer does not change the query. Refresh cancels pending requests and releases source snapshots, then restores state on matching paths using fresh server results. Matching uses the workspace, symbol identity and exact source range within each parent path; symbols moved or removed by edits may not retain their state. User interaction stops pending cursor restoration, so late replies do not take point away. `M-x revert-buffer` also refreshes; `C-u g` starts from `lsp-hierarchy-expand-depth`. Closing or replacing the view releases its requests and snapshots.
+Refresh repeats the query at its original source marker and in the same direction. The marker follows edits; moving point elsewhere in the source buffer does not change the query. Refresh cancels pending requests and releases source snapshots, then restores state on matching paths using fresh server results. Matching uses the workspace, symbol identity and exact source range within each parent path; symbols moved or removed by edits may not retain their state. Navigation and other non-refresh commands stop pending cursor restoration, so late replies do not take point away. Repeated refreshes and prepare retries retain the pending target, including each displaying window's independent cursor. `M-x revert-buffer` also refreshes; `C-u g` starts from `lsp-hierarchy-expand-depth`. Closing or replacing the view releases its requests and snapshots.
 
-Sorting and filtering operate on already loaded nodes without requesting more hierarchy data. Sorting keeps equal keys in server order and leaves call sites in their original order. Filtering reveals paths to matching loaded symbols even beneath folded ancestors; it keeps the stored expansion choices, which take effect again when the filter is cleared. Open branches retain their loading and error rows so refresh progress and retry actions remain accessible. Ordinary incremental search still searches only the displayed rows.
+Sorting and filtering operate on already loaded nodes without requesting more hierarchy data. Filtering uses the displayed names and enabled details; call-site excerpts remain folded until their owning symbol is expanded. Sorting keeps equal keys in server order and leaves call sites in their original order. Filtering reveals paths to matching loaded symbols even beneath folded ancestors; it keeps the stored expansion choices, which take effect again when the filter is cleared. Open branches retain their loading and error rows so refresh progress and retry actions remain accessible. Ordinary incremental search still searches only the displayed rows.
 
 `r` prepares a fresh hierarchy at the selected symbol. Its source buffer must be managed by the server that returned that symbol; otherwise the view is retained and the command asks you to activate that server in the source buffer. After re-rooting, refresh and direction changes use the new source marker and stay with the same server.
 
@@ -117,7 +117,7 @@ The implementation separates protocol conversion, model updates, and rendering:
 - A view owns its query context, roots, requests, and source snapshots.
 - A node represents one occurrence of a symbol along a tree path. Repeated symbols have independent state. Expansion is separate from loading (`unloaded`, `loading`, `loaded`, or `error`), so a request may finish while its node is folded.
 - Protocol adapters preserve the originating workspace and raw LSP item, including opaque server data. They return node data without inserting text or creating UI callbacks.
-- The renderer builds visible rows in a temporary buffer before replacing the display. Point and window positions are restored by node identity. Text properties locate model nodes; buffer indentation does not define the tree.
+- The renderer builds visible rows in a temporary buffer before replacing the display. Point and window positions are restored by node identity. Text properties locate model nodes; buffer indentation does not define the tree. A visible-row position index is published with the rendered text, so restoring hidden anchors only follows parent links and table lookups.
 
 Automatic expansion starts sibling requests as a batch and publishes their loading rows together. Sorting and filtering are display projections: they do not reorder the model or overwrite its expansion state. Mouse actions resolve the current row through shared commands rather than retaining callbacks per node.
 
