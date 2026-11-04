@@ -523,6 +523,10 @@ LSP kind abbreviations, the symbol label, and any extra details."
   (setq-local outline-regexp lsp-hierarchy--outline-regexp)
   (setq-local outline-level (lambda () (1+ (/ (current-indentation) 2))))
   (outline-minor-mode 1)
+  ;; Nodes already show their fold state with an arrow.  We hide whole lines,
+  ;; so outline's ellipsis would appear before the next visible node.
+  (remove-from-invisibility-spec '(outline . t))
+  (add-to-invisibility-spec 'outline)
 
   (setq-local buffer-undo-list t)
   (setq-local buffer-read-only t)

@@ -313,6 +313,38 @@
   "Return the position of rendered NODE in the current view."
   (text-property-any (point-min) (point-max) 'lsp-hierarchy-item node))
 
+(ert-deftest lsp-hierarchy-folding-hides-whole-lines-without-ellipsis ()
+  "Repeated folds must not prefix the next visible row with an ellipsis."
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root" "next-root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                               (vector (lsp-hierarchy-test--call "alpha")
+                                       (lsp-hierarchy-test--call "beta")))
+      (lsp-hierarchy-test--toggle "alpha")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                               (vector (lsp-hierarchy-test--call "grandchild")))
+      (lsp-hierarchy-test--toggle "alpha")
+      (dotimes (_ 3)
+        (lsp-hierarchy-test--toggle "root")
+        (dolist (name '("alpha" "grandchild" "beta"))
+          ;; `invisible-p' returns t for fully hidden text, but a different
+          ;; non-nil value when display replaces it with an ellipsis.
+          (should (eq t (invisible-p (lsp-hierarchy-test--node-position
+                                     (lsp-hierarchy-test--node name))))))
+        (should-not (invisible-p (lsp-hierarchy-test--node-position
+                                  (lsp-hierarchy-test--node "next-root"))))
+        (lsp-hierarchy-test--toggle "root")
+        (dolist (name '("alpha" "beta"))
+          (should-not (invisible-p (lsp-hierarchy-test--node-position
+                                    (lsp-hierarchy-test--node name)))))
+        (should (eq t (invisible-p (lsp-hierarchy-test--node-position
+                                   (lsp-hierarchy-test--node "grandchild"))))))
+      (lsp-hierarchy-test--toggle "alpha")
+      (should-not (invisible-p (lsp-hierarchy-test--node-position
+                                (lsp-hierarchy-test--node "grandchild")))))))
+
 (ert-deftest lsp-hierarchy-folding-survives-pending-descendants ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
