@@ -439,10 +439,22 @@ or asks a language server to discover more nodes."
 
 (defun lsp-hierarchy--expanded-for-display-p (node)
   "Return non-nil when NODE's children should appear in this projection."
-  (or (lsp-hierarchy--node-expanded node)
-      (and lsp-hierarchy--filter-matches
-           (seq-some (lambda (child) (gethash child lsp-hierarchy--filter-matches))
-                     (lsp-hierarchy--node-children node)))))
+  (if lsp-hierarchy--filter-matches
+      (or (seq-some (lambda (child) (gethash child lsp-hierarchy--filter-matches))
+                    (lsp-hierarchy--node-children node))
+          (and (lsp-hierarchy--node-expanded node)
+               (memq (lsp-hierarchy--node-load-state node) '(loading error))))
+    (lsp-hierarchy--node-expanded node)))
+
+(defun lsp-hierarchy--filter-path-p (node)
+  "Return non-nil if the filter keeps a symbol path below NODE visible."
+  ;; Call sites follow folding, whereas matching symbol paths stay visible
+  ;; even after a fold.  Only the latter need the filter override hint.
+  (and lsp-hierarchy--filter-matches
+       (seq-some (lambda (child)
+                   (and (eq (lsp-hierarchy--node-type child) 'symbol)
+                        (gethash child lsp-hierarchy--filter-matches)))
+                 (lsp-hierarchy--node-children node))))
 
 (defun lsp-hierarchy--insert-subtree (node indent)
   "Render NODE and its visible descendants at INDENT."
@@ -828,9 +840,11 @@ Preview does not add an xref history entry or run jump hooks."
                 "mouse-1, TAB: Retry loading children")
                ((lsp-hierarchy--node-expanded item) "mouse-1, TAB: Fold this branch")
                (t "mouse-1, TAB: Expand this branch"))
-         (when (and lsp-hierarchy--filter-matches
-                    (lsp-hierarchy--expanded-for-display-p item))
-           "\nFilter keeps matching paths visible; clear it to apply folding")))))))
+         (cond ((lsp-hierarchy--filter-path-p item)
+                "\nFilter keeps matching paths visible; clear it to apply folding")
+               ((and (lsp-hierarchy--node-expanded item)
+                     (not (lsp-hierarchy--expanded-for-display-p item)))
+                "\nChildren are hidden by the filter"))))))))
 
 ;;; Major Mode Definition
 

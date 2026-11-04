@@ -38,6 +38,12 @@
 - **原因**：当某个已展开节点（`expanded = t`）自身匹配过滤正则，但其所有子节点均不匹配时，`lsp-hierarchy--expanded-for-display-p`（L431-L436）仍返回 `t`。
 - **后果**：该节点下方没有任何可见子节点，但图标仍显示为展开态 `▼`，且 `help-echo` 提示 *"Filter keeps matching paths visible; clear it to apply folding"*（实际上此时按 `TAB` 是可以直接折叠的）。
 
+**核查与处理（已修复）**
+
+- 问题存在。过滤后的显示展开状态此前直接复用了模型的 `expanded`，也把可以正常折叠的调用位置当成了强制显示的路径。
+- 过滤期间，箭头现在依据实际保留的子行或加载/错误状态行显示。只有过滤保留了子符号路径时才显示“清除过滤后应用折叠”的提示；子项全部被隐藏时显示收起箭头并说明原因。模型中的展开选择保持不变。
+- 验证：覆盖自身匹配但子项全隐藏、祖先路径被强制显示、只有调用位置的可折叠分支；91 项 ERT 全部通过。
+
 ### 4. 刷新（Refresh）期间再次按 `g` 或 `prepare` 失败重试会丢失待恢复的光标焦点（`restore-focus`）
 - **位置**：`lsp-hierarchy--cancel-restore-focus`（L1198-L1201）、`lsp-hierarchy--restore-focus`（L1203-L1223）、`lsp-hierarchy--save-refresh-state`（L1112-L1149）
 - **原因**：

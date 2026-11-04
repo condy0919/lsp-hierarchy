@@ -1886,5 +1886,43 @@
       (should (= 1 (length lsp-hierarchy-test--sent))))))
 
 
+(ert-deftest lsp-hierarchy-filter-icons-describe-visible-children ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show 'type)
+      (lsp-hierarchy-test--roots "foo")
+      (lsp-hierarchy-test--toggle "foo")
+      (lsp-hierarchy-test--type-children "bar")
+      (lsp-hierarchy-filter "^foo$")
+      (goto-char (point-min))
+      (should (equal (get-text-property (point) 'display) lsp-hierarchy-icon-close))
+      (should (string-match-p "Children are hidden" (get-text-property (point) 'help-echo)))
+      (should-not (string-match-p "Filter keeps" (get-text-property (point) 'help-echo)))
+      (lsp-hierarchy-toggle)
+      (should-not (lsp-hierarchy--node-expanded (lsp-hierarchy-test--node "foo")))
+      (lsp-hierarchy-filter "bar")
+      (goto-char (point-min))
+      (should (equal (get-text-property (point) 'display) lsp-hierarchy-icon-open))
+      (should (string-match-p "Filter keeps" (get-text-property (point) 'help-echo)))
+      (should (= 2 (length lsp-hierarchy-test--sent))))))
+
+(ert-deftest lsp-hierarchy-filter-site-only-branch-has-no-forced-path-hint ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer lsp-hierarchy-test--source (insert "call();\n"))
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply
+       (car lsp-hierarchy-test--sent)
+       (vector (lsp-hierarchy-test--call "caller" nil (vector (lsp-hierarchy-test--range 0 0 4)))))
+      (lsp-hierarchy-test--toggle "caller")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
+      (lsp-hierarchy-filter "caller")
+      (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "caller"))
+      (search-forward "@")
+      (backward-char)
+      (should (equal (get-text-property (point) 'display) lsp-hierarchy-icon-open))
+      (should-not (string-match-p "Filter keeps" (get-text-property (point) 'help-echo))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
