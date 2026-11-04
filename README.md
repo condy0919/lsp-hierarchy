@@ -48,14 +48,28 @@ You can bind the primary commands to your preferred keys or add them to the `lsp
 
 ### Keybindings (Hierarchy Buffer)
 
-- `TAB`: Toggle node expansion, or retry a failed expansion from its node or error row. At a leaf, move to the next visible symbol.
-- `RET`: Jump to source.
-- `n`/`p`: Navigate between visible rows.
-- `g`: Refresh the hierarchy. `M-x revert-buffer` does the same.
+| Key | Action |
+| --- | --- |
+| `TAB` | Expand or fold a node; retry a failed request. At a leaf, move to the next visible symbol. |
+| `RET` | Jump to source and record the departure in xref history. |
+| `SPC` | Preview source in another window, keeping focus in the hierarchy. |
+| `n` / `p` | Move between visible rows. |
+| `u` | Move to the parent node. |
+| `M-n` / `M-p` | Move between visible siblings, skipping descendants. |
+| Left arrow | Fold the current branch, or move to its parent if already closed. |
+| `g` | Refresh while restoring matching branches and the selected location. |
+| `C-u g` | Refresh with the initial expansion depth, discarding saved tree state. |
+| `s` | Cycle through server order, name order, and source location order. |
+| `/` | Filter loaded symbol names and details by regexp; empty input clears the filter. |
+| `?` | Show mode help. |
 
-Nodes can be folded while loading. A response arriving under a folded node is cached without reopening it. A node with no child symbols or call sites becomes a leaf and loses its expansion arrow; an empty root result displays `No hierarchy found.` If the initial request fails, use `g` to retry.
+Click an arrow to expand or fold, a symbol name or call site to visit source, or an error row to retry. Hover over names and call sites to see their full URI and line number. Symbol labels cover all standard LSP symbol kinds; detailed labels also show the number of known call sites on that edge.
 
-Refresh repeats the query at its original source marker and in the same direction. The marker follows edits; moving point elsewhere in the source buffer does not change the query. Refresh cancels pending requests, releases source snapshots, and rebuilds the tree using `lsp-hierarchy-expand-depth`. Closing or replacing the view also releases its requests and snapshots.
+Nodes can be folded while loading. Known call sites appear immediately on expansion, while deeper relationships load independently. A response arriving under a folded node is cached without reopening it. A node with no child symbols or call sites becomes a leaf and loses its expansion arrow; an empty root result displays `No hierarchy found.` If the initial request fails, use `g` to retry.
+
+Refresh repeats the query at its original source marker and in the same direction. The marker follows edits; moving point elsewhere in the source buffer does not change the query. Refresh cancels pending requests and releases source snapshots, then restores state on matching paths using fresh server results. Matching uses the workspace, symbol identity and exact source range within each parent path; symbols moved or removed by edits may not retain their state. User interaction stops pending cursor restoration, so late replies do not take point away. `M-x revert-buffer` also refreshes; `C-u g` starts from `lsp-hierarchy-expand-depth`. Closing or replacing the view releases its requests and snapshots.
+
+Sorting and filtering operate on already loaded nodes without requesting more hierarchy data. Sorting keeps equal keys in server order and leaves call sites in their original order. Filtering reveals paths to matching loaded symbols even beneath folded ancestors; it keeps the stored expansion choices, which take effect again when the filter is cleared. Open branches retain their loading and error rows so refresh progress and retry actions remain accessible. Ordinary incremental search still searches only the displayed rows.
 
 ### Example
 
@@ -63,7 +77,7 @@ An incoming-call view after expanding a caller:
 
 ```text
 ▼ [f] target
-  ▼ [f] caller
+  ▼ [f] caller (1 site)
         int caller() { return target(1); } (line 5)
 ```
 
@@ -73,7 +87,7 @@ An incoming-call view after expanding a caller:
 ;; Initial expansion depth: 0 keeps roots closed; 1 loads their children
 (setq lsp-hierarchy-expand-depth 1)
 
-;; Include signatures in symbol labels
+;; Include signatures and known call-site counts in symbol labels
 (setq lsp-hierarchy-detailed-outline t)
 
 ;; Custom icons
@@ -83,6 +97,8 @@ An incoming-call view after expanding a caller:
 
 Call-site text is read only for visible rows. Open buffers supply their current contents, including unsaved edits; other files use view-local snapshots refreshed when the file changes.
 
+`lsp-hierarchy-display-buffer-action` controls source jumps and previews through the standard Emacs display functions. Matching `display-buffer-alist` rules retain priority. Previews require another window and do not add xref history entries or run jump hooks.
+
 ## Architecture and upstream integration
 
 The implementation separates protocol conversion, model updates, and rendering:
@@ -91,6 +107,10 @@ The implementation separates protocol conversion, model updates, and rendering:
 - A node represents one occurrence of a symbol along a tree path. Repeated symbols have independent state. Expansion is separate from loading (`unloaded`, `loading`, `loaded`, or `error`), so a request may finish while its node is folded.
 - Protocol adapters preserve the originating workspace and raw LSP item, including opaque server data. They return node data without inserting text or creating UI callbacks.
 - The renderer builds visible rows in a temporary buffer before replacing the display. Point and window positions are restored by node identity. Text properties locate model nodes; buffer indentation does not define the tree.
+
+Automatic expansion starts sibling requests as a batch and publishes their loading rows together. Sorting and filtering are display projections: they do not reorder the model or overwrite its expansion state. Mouse actions resolve the current row through shared commands rather than retaining callbacks per node.
+
+Refresh snapshots contain path identity and presentation state, not old protocol items or request tokens. Fresh nodes always use the new response's opaque server data. Restoring expansion and restoring point are separate, so a user can stop a pending branch expansion or move away while requests finish.
 
 Parent/child links are stored directly on nodes. The implementation no longer depends on `hierarchy.el` or `outline-minor-mode`; one model controls both the arrows and which rows appear. View generations and request tokens reject responses belonging to a replaced or closed view.
 
@@ -107,7 +127,7 @@ make lint
 make test
 ```
 
-The request tests use lsp-mode's response handlers with a controllable transport to cover stale responses, cancellation, retries, server routing, and out-of-order completion. Other tests cover folding, rendering failures, refresh, point/window preservation, structured labels, Unicode positions, and source caching.
+The request tests use lsp-mode's response handlers with a controllable transport to cover stale responses, cancellation, retries, server routing, and out-of-order completion. Other tests cover folding, render batching and rollback, refresh restoration, navigation, mouse actions, source previews, sorting/filtering, point/window preservation, structured labels, Unicode positions, and source caching.
 
 CI tests hash-table and plist protocol objects in separate environments. For a local plist build, set `LSP_USE_PLISTS=true` before installing and compiling dependencies; changing it after compilation does not change generated LSP accessors.
 
