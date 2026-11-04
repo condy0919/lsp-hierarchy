@@ -776,5 +776,58 @@
         (should-not (lsp-hierarchy--node-expanded node)))
       (should-not (string-match-p "Failed" (buffer-string))))))
 
+(ert-deftest lsp-hierarchy-refresh-keeps-source-position-and-rejects-old-replies ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer lsp-hierarchy-test--source
+      (insert "first\nsecond\nthird\n")
+      (goto-char 10))
+    (with-current-buffer (lsp-hierarchy-test--show 'call t)
+      (lsp-hierarchy-test--roots "old")
+      (lsp-hierarchy-test--toggle "old")
+      (let ((old-request (car lsp-hierarchy-test--sent))
+            (old-origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
+        (setq-local lsp-hierarchy-icon-close "+")
+        (with-current-buffer lsp-hierarchy-test--source (goto-char (point-max)))
+        (revert-buffer nil t)
+        (should-not (marker-buffer old-origin))
+        (let* ((request (car lsp-hierarchy-test--sent))
+               (params (plist-get (plist-get request :body) :params))
+               (position (plist-get params :position)))
+          (should (= 1 (plist-get position :line)))
+          (should (= 3 (plist-get position :character))))
+        (lsp-hierarchy-test--roots "new")
+        (lsp-hierarchy-test--reply old-request (vector (lsp-hierarchy-test--call "stale")))
+        (should-not (string-match-p "stale" (buffer-string)))
+        (should (equal (get-text-property (point-min) 'display) "+"))
+        (lsp-hierarchy-test--toggle "new")
+        (should (equal (plist-get (plist-get (car lsp-hierarchy-test--sent) :body) :method)
+                       "callHierarchy/outgoingCalls"))))))
+
+(ert-deftest lsp-hierarchy-refresh-releases-owned-resources ()
+  (let ((file (make-temp-file "hierarchy-refresh-" nil ".c" "call();\n")))
+    (unwind-protect
+        (lsp-hierarchy-test--with-session
+          (with-current-buffer (lsp-hierarchy-test--show)
+            (lsp-hierarchy-test--roots "root")
+            (let ((snapshot (lsp-hierarchy--source-snapshot file))
+                  (origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
+              (lsp-hierarchy-test--toggle "root")
+              (lsp-hierarchy-refresh)
+              (should-not (buffer-live-p snapshot))
+              (should-not (marker-buffer origin))
+              (should (= 1 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))
+              (setq origin (lsp-hierarchy--view-origin lsp-hierarchy--view))
+              (kill-buffer (current-buffer))
+              (should-not (marker-buffer origin)))))
+      (delete-file file))))
+
+(ert-deftest lsp-hierarchy-refresh-rejects-killed-source ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (kill-buffer lsp-hierarchy-test--source)
+      (should-error (lsp-hierarchy-refresh) :type 'user-error)
+      (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

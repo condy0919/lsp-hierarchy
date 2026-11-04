@@ -101,7 +101,7 @@ several paths lead to the same protocol item."
 
 (cl-defstruct (lsp-hierarchy--view (:constructor lsp-hierarchy--make-view))
   "Resources and query context owned by one hierarchy buffer."
-  source kind direction roots (status 'ready) error
+  source origin kind direction roots (status 'ready) error
   (generation (make-symbol "lsp-hierarchy-view"))
   (requests (make-hash-table :test 'eq))
   (file-cache (make-hash-table :test 'equal))
@@ -130,6 +130,8 @@ several paths lead to the same protocol item."
   ;; Local kill hooks can survive a major-mode change after view locals are gone.
   (when (lsp-hierarchy--view-p lsp-hierarchy--view)
     (setf (lsp-hierarchy--view-generation lsp-hierarchy--view) nil)
+    (when-let* ((origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
+      (set-marker origin nil))
     (when (lsp-hierarchy--view-requests lsp-hierarchy--view)
       (maphash (lambda (token _) (lsp-hierarchy--cancel-request token)) (lsp-hierarchy--view-requests lsp-hierarchy--view))
       (clrhash (lsp-hierarchy--view-requests lsp-hierarchy--view)))
@@ -482,6 +484,7 @@ An empty successful response is a leaf; an error remains retryable."
     (define-key map (kbd "TAB") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "<tab>") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "RET") #'lsp-hierarchy-goto)
+    (define-key map (kbd "g") #'lsp-hierarchy-refresh)
     map)
   "Keymap for `lsp-hierarchy-mode'.")
 
@@ -495,6 +498,7 @@ An empty successful response is a leaf; an error remains retryable."
   (setq-local buffer-read-only t)
   (setq-local indent-tabs-mode nil)
   (setq-local truncate-lines t)
+  (setq-local revert-buffer-function #'lsp-hierarchy--revert)
 
   (setq-local lsp-hierarchy--view (lsp-hierarchy--make-view))
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
@@ -665,8 +669,8 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
         (lsp-hierarchy--view-error lsp-hierarchy--view) err)
   (lsp-hierarchy--render))
 
-(defun lsp-hierarchy--prepare (view-type direction)
-  "Prepare VIEW-TYPE in DIRECTION, keeping only the latest requested view."
+(defun lsp-hierarchy--prepare (view-type direction &optional target)
+  "Prepare VIEW-TYPE in DIRECTION, replacing TARGET or the default view."
   (let* ((source (current-buffer))
          (method (if (eq view-type 'call)
                      "textDocument/prepareCallHierarchy" "textDocument/prepareTypeHierarchy"))
@@ -677,12 +681,18 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
                                      (capitalize (symbol-name view-type)))))
          (params (lsp--text-document-position-params))
          (name (if (eq view-type 'call) "*LSP Call Hierarchy*" "*LSP Type Hierarchy*"))
-         (view (get-buffer-create name)))
+         (view (or target (get-buffer-create name)))
+         (origin (copy-marker (point))))
     (with-current-buffer view
-      ;; Resetting the mode cancels the previous generation before replacing
-      ;; its text.  New requests belong to this view until completion or exit.
-      (lsp-hierarchy-mode)
+      ;; Replacing the model cancels old requests and frees snapshots, while
+      ;; retaining the user's buffer-local display preferences and mode hooks.
+      (if (derived-mode-p 'lsp-hierarchy-mode)
+          (progn
+            (lsp-hierarchy--dispose)
+            (setq lsp-hierarchy--view (lsp-hierarchy--make-view)))
+        (lsp-hierarchy-mode))
       (setf (lsp-hierarchy--view-source lsp-hierarchy--view) source
+            (lsp-hierarchy--view-origin lsp-hierarchy--view) origin
             (lsp-hierarchy--view-kind lsp-hierarchy--view) view-type
             (lsp-hierarchy--view-direction lsp-hierarchy--view) direction
             (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading)
@@ -690,6 +700,7 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
                           (if direction "Outgoing Calls" "Incoming Calls")
                         (if (eq direction 'supertypes) "Supertypes" "Subtypes")))
       (lsp-hierarchy--render)
+      (goto-char (point-min))
       (lsp-hierarchy--request
        source
        method params
@@ -704,6 +715,30 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
        #'lsp-hierarchy--prepare-failed
        nil workspaces t))
     (pop-to-buffer view)))
+
+(defun lsp-hierarchy-refresh ()
+  "Refresh this view at its original source position.
+The source marker follows edits, but moving point in the source buffer does
+not change the query.  Refresh discards cached nodes and pending requests."
+  (interactive)
+  (unless (and (derived-mode-p 'lsp-hierarchy-mode) lsp-hierarchy--view)
+    (user-error "Not in a hierarchy view"))
+  (let ((target (current-buffer))
+        (kind (lsp-hierarchy--view-kind lsp-hierarchy--view))
+        (direction (lsp-hierarchy--view-direction lsp-hierarchy--view))
+        (origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
+    (unless (and (markerp origin) (marker-buffer origin))
+      (user-error "The hierarchy source buffer has been killed"))
+    (with-current-buffer (marker-buffer origin)
+      (save-restriction
+        (widen)
+        (save-excursion
+          (goto-char origin)
+          (lsp-hierarchy--prepare kind direction target))))))
+
+(defun lsp-hierarchy--revert (_ignore-auto _noconfirm)
+  "Refresh the current hierarchy through `revert-buffer'."
+  (lsp-hierarchy-refresh))
 
 ;;;###autoload
 (defun lsp-hierarchy-show-call (&optional outgoing)
