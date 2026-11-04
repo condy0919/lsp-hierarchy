@@ -1,20 +1,19 @@
 # lsp-hierarchy
 
-LSP call and type hierarchy views for Emacs, fully powered by the built-in `hierarchy.el` data engine.
+Explore LSP call and type hierarchies in a standard Emacs buffer.
 
 ## Overview
 
-`lsp-hierarchy` provides a clean, minimalistic way to explore symbol hierarchies (callers/callees and super/subtypes) provided by Language Servers via `lsp-mode`. Unlike other solutions that require external sidebars or complex UI frameworks, `lsp-hierarchy` uses standard Emacs buffers and the native `hierarchy.el` library (introduced in Emacs 29.1) to manage and render tree structures.
+`lsp-hierarchy` explores callers, callees, subtypes, and supertypes through `lsp-mode`. It uses built-in `hierarchy.el` for tree relationships and `outline-minor-mode` for folding.
 
 ## Comparison with lsp-treemacs
 
 | Feature          | lsp-hierarchy                         | lsp-treemacs                         |
 |:-----------------|:--------------------------------------|:-------------------------------------|
-| **Dependency**   | Lightweight (built-in `hierarchy.el`) | Heavy (requires `treemacs`)          |
+| **UI dependency** | Built-in Emacs libraries             | `treemacs`                           |
 | **UI Style**     | Standard Emacs buffer (outline-like)  | Dedicated sidebar with icons/widgets |
-| **Performance**  | High (native data structures)         | Moderate (UI overhead)               |
 | **UX**           | Minimalist, "vanilla" feel            | Rich, feature-packed IDE feel        |
-| **Asynchronous** | Yes (non-blocking)                    | Yes                                  |
+| **LSP requests** | Asynchronous                          | Asynchronous                         |
 
 ### Pros
 - **Ultra-lightweight**: No need to install and configure `treemacs` or `posframe`.
@@ -29,10 +28,12 @@ LSP call and type hierarchy views for Emacs, fully powered by the built-in `hier
 
 ## Installation
 
+Requires Emacs 29.1 or newer and lsp-mode 9.0 or newer.
+
 ### Melpa
 
 ``` elisp
-(use-package lsp-hierarcy
+(use-package lsp-hierarchy
   :ensure t)
 ```
 
@@ -63,16 +64,24 @@ You can bind the primary commands to your preferred keys or add them to the `lsp
 ### Keybindings (Hierarchy Buffer)
 - `TAB`: Toggle node expansion.
 - `RET`: Jump to source.
-- `n`/`p`: Navigate between nodes.
+- `n`/`p`: Navigate between visible rows.
 
-### Screenshots
+If expansion fails, press `TAB` on the node to retry. Nodes can be folded while loading. Closing the view or starting a new view cancels its pending requests.
 
-![lsp-incoming-calls](https://private-user-images.githubusercontent.com/4024656/597368061-a2ccaed8-9621-451a-89d7-03017c3735c2.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3Nzk2NjI0MjcsIm5iZiI6MTc3OTY2MjEyNywicGF0aCI6Ii80MDI0NjU2LzU5NzM2ODA2MS1hMmNjYWVkOC05NjIxLTQ1MWEtODlkNy0wMzAxN2MzNzM1YzIucG5nP1gtQW16LUFsZ29yaXRobT1BV1M0LUhNQUMtU0hBMjU2JlgtQW16LUNyZWRlbnRpYWw9QUtJQVZDT0RZTFNBNTNQUUs0WkElMkYyMDI2MDUyNCUyRnVzLWVhc3QtMSUyRnMzJTJGYXdzNF9yZXF1ZXN0JlgtQW16LURhdGU9MjAyNjA1MjRUMjIzNTI3WiZYLUFtei1FeHBpcmVzPTMwMCZYLUFtei1TaWduYXR1cmU9ZDVlOTllOTUyNzM5NGVjNmUzZDBiYjEwZjk5NmMxODZkMzFkMWQ1MjMxNzk0OWJkMDdiZDQ4YjM2YzY3MzRmNCZYLUFtei1TaWduZWRIZWFkZXJzPWhvc3QmcmVzcG9uc2UtY29udGVudC10eXBlPWltYWdlJTJGcG5nIn0.do9z3AsLAcZu4j_kaFkMr2gtb-YyJ6YS3g3XAhoj4Ak "lsp-incoming-calls")
+### Example
+
+An incoming-call view after expanding a caller:
+
+```text
+▼ [f] target
+  ▼ [f] caller
+        int caller() { return target(1); } (line 5)
+```
 
 ## Customization
 
 ```elisp
-;; Initial expansion depth
+;; Initial expansion depth: 0 keeps roots closed; 1 loads their children
 (setq lsp-hierarchy-expand-depth 1)
 
 ;; Include signatures in symbol labels
@@ -82,6 +91,23 @@ You can bind the primary commands to your preferred keys or add them to the `lsp
 (setq lsp-hierarchy-icon-open "▼")
 (setq lsp-hierarchy-icon-close "▶")
 ```
+
+Call-site text is read when its row is first shown. Open buffers supply their current contents, including unsaved edits; other files use view-local snapshots refreshed when the file changes. Closing or replacing the view releases these snapshots.
+
+## Development
+
+With Emacs and Eask installed:
+
+```sh
+make install
+make compile
+make lint
+make test
+```
+
+The request tests use lsp-mode's response handlers with a controllable transport to cover stale responses, cancellation, retries, server routing, and out-of-order completion. Other tests cover folding, navigation, Unicode positions, and source caching.
+
+CI tests hash-table and plist protocol objects in separate environments. For a local plist build, set `LSP_USE_PLISTS=true` before installing and compiling dependencies; changing it after compilation does not change generated LSP accessors.
 
 ## License
 GPL-3.0-or-later
