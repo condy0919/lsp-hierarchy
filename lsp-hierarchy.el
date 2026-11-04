@@ -101,6 +101,9 @@ Zero leaves roots closed; one loads their immediate children."
 (defvar-local lsp-hierarchy--generation nil
   "Identity of the currently requested view, used to reject late responses.")
 
+(defvar-local lsp-hierarchy--file-cache nil
+  "Map filenames to (SIGNATURE . BUFFER) for snapshots owned by this view.")
+
 (defvar-local lsp-hierarchy--requests nil
   "Cancellation tokens owned by the current view.")
 
@@ -124,7 +127,12 @@ Zero leaves roots closed; one loads their immediate children."
   (setq lsp-hierarchy--generation nil)
   (when lsp-hierarchy--requests
     (maphash (lambda (token _) (lsp-hierarchy--cancel-request token)) lsp-hierarchy--requests)
-    (clrhash lsp-hierarchy--requests)))
+    (clrhash lsp-hierarchy--requests))
+  (when lsp-hierarchy--file-cache
+    (maphash (lambda (_ entry)
+               (when (buffer-live-p (cdr entry)) (kill-buffer (cdr entry))))
+             lsp-hierarchy--file-cache)
+    (clrhash lsp-hierarchy--file-cache)))
 
 (defun lsp-hierarchy--error-message (err)
   "Format a protocol error, Lisp condition or string ERR."
@@ -248,7 +256,11 @@ LSP kind abbreviations, the symbol label, and any extra details."
     (insert (make-string (* indent 2) ?\s))
 
     (when (eq type 'code)
-      (insert "    " label))
+      ;; Read call-site text only when its row becomes part of the view.
+      ;; Unopened siblings keep protocol locations without doing file I/O.
+      (insert "    " (or label (lsp-hierarchy--extract-line
+                               (plist-get item :uri) (plist-get item :range)
+                               (plist-get item :workspace)))))
 
     (when (eq type 'symbol)
       (if (or cfn (hierarchy-children hierarchy (plist-get item :id)))
@@ -519,6 +531,7 @@ LSP kind abbreviations, the symbol label, and any extra details."
 
   (setq-local lsp-hierarchy--generation (make-symbol "lsp-hierarchy-view"))
   (setq-local lsp-hierarchy--requests (make-hash-table :test 'eq))
+  (setq-local lsp-hierarchy--file-cache (make-hash-table :test 'equal))
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t)
   (setq-local lsp-hierarchy--state-table (make-hash-table :test 'eq))
@@ -614,6 +627,23 @@ with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
         (forward-char 1)))
     (point)))
 
+(defun lsp-hierarchy--source-snapshot (filename)
+  "Return a current buffer for FILENAME, reusing owned snapshots."
+  (or (find-buffer-visiting filename)
+      (let* ((attrs (file-attributes filename))
+             (signature (list (file-attribute-modification-time attrs)
+                              (file-attribute-size attrs)))
+             (entry (gethash filename lsp-hierarchy--file-cache)))
+        (unless (and entry (buffer-live-p (cdr entry)))
+          (setq entry (cons nil (generate-new-buffer " *lsp-hierarchy-source*")))
+          (puthash filename entry lsp-hierarchy--file-cache))
+        (unless (equal (car entry) signature)
+          (with-current-buffer (cdr entry)
+            (erase-buffer)
+            (insert-file-contents filename))
+          (setcar entry signature))
+        (cdr entry))))
+
 (defun lsp-hierarchy--extract-line (uri range &optional workspace)
   "Extract the first line of RANGE at URI using WORKSPACE's position encoding."
   (let* ((line (lsp-get (lsp-get range :start) :line))
@@ -637,9 +667,8 @@ with lsp-mode 9 and source snapshots which have no buffer-local LSP state."
                    (propertize (format " (line %d)" (1+ line)) 'face 'lsp-hierarchy-detail-face))))))))
     (condition-case nil
         (let ((filename (with-lsp-workspace workspace (lsp--uri-to-path uri))))
-          (if-let* ((source (find-buffer-visiting filename)))
-              (with-current-buffer source (funcall read-line))
-            (with-temp-buffer (insert-file-contents filename) (funcall read-line))))
+          (with-current-buffer (lsp-hierarchy--source-snapshot filename)
+            (funcall read-line)))
       (error (format "call at line %d" (1+ line))))))
 
 (defun lsp-hierarchy--open-file (uri range &optional workspace)
@@ -683,7 +712,7 @@ ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
                              :goto-fn (lambda () (lsp-hierarchy--open-file uri (lsp-get tar :selectionRange) workspace))
                              :children (mapcar (lambda (r)
                                                  (list :id (make-symbol "lsp-hierarchy-node") :workspace workspace
-                                                       :label (lsp-hierarchy--extract-line call-uri r workspace)
+                                                       :uri call-uri :range r
                                                        :type 'code
                                                        :goto-fn (lambda () (lsp-hierarchy--open-file call-uri r workspace))))
                                                (append (lsp-get call :fromRanges) nil))

@@ -479,5 +479,56 @@
           (should-not (eq (plist-get (car children) :workspace)
                           (plist-get (cadr children) :workspace))))))))
 
+(ert-deftest lsp-hierarchy-lazy-call-sites-and-file-cache ()
+  (let ((file (make-temp-file "hierarchy-sites-" nil ".c" "foo(); foo();\n")))
+    (unwind-protect
+        (lsp-hierarchy-test--with-session
+          (with-current-buffer (lsp-hierarchy-test--show)
+            (lsp-hierarchy-test--roots "root")
+            (lsp-hierarchy-test--toggle "root")
+            (let ((uri (lsp--path-to-uri file))
+                  (reads 0)
+                  (read-file (symbol-function 'insert-file-contents)))
+              (cl-letf (((symbol-function 'insert-file-contents)
+                         (lambda (filename &rest args)
+                           (when (equal filename file) (cl-incf reads))
+                           (apply read-file filename args))))
+                (lsp-hierarchy-test--reply
+                 (car lsp-hierarchy-test--sent)
+                 (vector (lsp-hierarchy-test--call
+                          "caller" uri (vector (lsp-hierarchy-test--range 0 0 3)
+                                               (lsp-hierarchy-test--range 0 7 10)))))
+                (should (= reads 0))
+                (lsp-hierarchy-test--toggle "caller")
+                (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) nil)
+                (should (= reads 1))
+                (should (= 1 (hash-table-count lsp-hierarchy--file-cache)))
+                (font-lock-ensure)
+                (should (string-match-p "foo();" (buffer-string)))
+                (let ((snapshot (cdr (gethash file lsp-hierarchy--file-cache))))
+                  (kill-buffer (current-buffer))
+                  (should-not (buffer-live-p snapshot)))))))
+      (delete-file file))))
+
+(ert-deftest lsp-hierarchy-file-cache-refresh-and-live-buffer-precedence ()
+  (let ((file (make-temp-file "hierarchy-cache-" nil ".c" "old();\n"))
+        visited)
+    (unwind-protect
+        (with-temp-buffer
+          (lsp-hierarchy-mode)
+          (let* ((uri (lsp--path-to-uri file))
+                 (range (lsp-hierarchy-test--range 0 0 3)))
+            (should (string-prefix-p "old" (lsp-hierarchy--extract-line uri range)))
+            (with-temp-file file (insert "updated();\n"))
+            (should (string-prefix-p "updated" (lsp-hierarchy--extract-line uri range)))
+            (setq visited (find-file-noselect file))
+            (with-current-buffer visited (erase-buffer) (insert "unsaved();\n"))
+            (should (string-prefix-p "unsaved" (lsp-hierarchy--extract-line uri range)))
+            (should (buffer-modified-p visited))))
+      (when (buffer-live-p visited)
+        (with-current-buffer visited (set-buffer-modified-p nil))
+        (kill-buffer visited))
+      (delete-file file))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
