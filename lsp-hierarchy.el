@@ -383,6 +383,68 @@ An empty successful response is a leaf; an error remains retryable."
   (or (lsp-hierarchy--get-prop 'lsp-hierarchy-item)
       (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node)))
 
+(defun lsp-hierarchy--goto-node (node)
+  "Move to the start of NODE's visible row."
+  (let ((position (and node (text-property-any (point-min) (point-max)
+                                              'lsp-hierarchy-item node))))
+    (unless position (user-error "Node is not visible"))
+    (goto-char position)))
+
+(defun lsp-hierarchy-parent ()
+  "Move to the parent of the node at point."
+  (interactive)
+  (let* ((node (lsp-hierarchy--node-at-point))
+         (parent (and node (lsp-hierarchy--node-parent node))))
+    (unless parent (user-error "No parent node"))
+    (lsp-hierarchy--goto-node parent)))
+
+(defun lsp-hierarchy--visible-siblings (node)
+  "Return NODE's visible siblings in their displayed order."
+  (let ((parent (lsp-hierarchy--node-parent node))
+        (position (point-min)) siblings)
+    ;; Scan the visible rows once.  Looking up every model sibling separately
+    ;; would repeatedly scan the buffer when a node has thousands of children.
+    (while (< position (point-max))
+      (let ((candidate (get-text-property position 'lsp-hierarchy-item)))
+        (when (and candidate (eq (lsp-hierarchy--node-parent candidate) parent))
+          (push candidate siblings)))
+      (setq position (next-single-property-change position 'lsp-hierarchy-item nil (point-max))))
+    (nreverse siblings)))
+
+(defun lsp-hierarchy--move-sibling (backward)
+  "Move to the next sibling, or the previous one when BACKWARD is non-nil."
+  (let* ((node (or (lsp-hierarchy--node-at-point) (user-error "No node here")))
+         (siblings (lsp-hierarchy--visible-siblings node))
+         (target (cadr (memq node (if backward (reverse siblings) siblings)))))
+    (unless target (user-error "No %s sibling" (if backward "previous" "next")))
+    (lsp-hierarchy--goto-node target)))
+
+(defun lsp-hierarchy-next-sibling ()
+  "Move to the next visible sibling, skipping descendants."
+  (interactive)
+  (lsp-hierarchy--move-sibling nil))
+
+(defun lsp-hierarchy-previous-sibling ()
+  "Move to the previous visible sibling, skipping descendants."
+  (interactive)
+  (lsp-hierarchy--move-sibling t))
+
+(defun lsp-hierarchy-collapse-or-parent ()
+  "Collapse the current branch, or move to its parent if already closed.
+A loading or failed branch is folded without cancelling or retrying it."
+  (interactive)
+  (let ((node (or (lsp-hierarchy--node-at-point) (user-error "No node here"))))
+    (if (and (lsp-hierarchy--node-expanded node) (lsp-hierarchy--expandable-p node))
+        (progn
+          (setf (lsp-hierarchy--node-expanded node) nil)
+          (condition-case err
+              (lsp-hierarchy--render)
+            (error
+             (setf (lsp-hierarchy--node-expanded node) t)
+             (signal (car err) (cdr err))))
+          (lsp-hierarchy--goto-node node))
+      (lsp-hierarchy-parent))))
+
 (defun lsp-hierarchy-toggle ()
   "Toggle the node at point, loading its children when necessary."
   (interactive)
@@ -502,6 +564,10 @@ An empty successful response is a leaf; an error remains retryable."
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
+    (define-key map (kbd "u") #'lsp-hierarchy-parent)
+    (define-key map (kbd "<left>") #'lsp-hierarchy-collapse-or-parent)
+    (define-key map (kbd "M-n") #'lsp-hierarchy-next-sibling)
+    (define-key map (kbd "M-p") #'lsp-hierarchy-previous-sibling)
     (define-key map (kbd "TAB") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "<tab>") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "RET") #'lsp-hierarchy-goto)
