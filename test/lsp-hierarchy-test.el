@@ -14,6 +14,13 @@
    :server-capabilities (or capabilities (lsp-make-server-capabilities))
    :registered-server-capabilities registrations))
 
+(defun lsp-hierarchy-test--type-workspaces (&rest ids)
+  "Make type-hierarchy workspaces with server IDS."
+  (mapcar (lambda (id)
+            (lsp-hierarchy-test--workspace
+             id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
+          ids))
+
 (defun lsp-hierarchy-test--send (body process)
   "Record BODY sent to PROCESS, including the real response handlers."
   (when-let* ((id (plist-get body :id))
@@ -97,7 +104,7 @@
 (defun lsp-hierarchy-test--node (name)
   "Find a model node with NAME, whether or not its row is visible."
   (or (seq-find (lambda (node)
-                  (equal name (lsp-hierarchy--node-name node)))
+                  (equal name (lsp-hierarchy--item-get node :name)))
                 (lsp-hierarchy-test--nodes))
       (ert-fail (format "Missing node %s" name))))
 
@@ -107,8 +114,8 @@
                                 (lsp-hierarchy-test--node name)))
   (lsp-hierarchy-toggle))
 
-(defun lsp-hierarchy-test--roots (&rest names)
-  "Reply to the latest prepare request with roots named NAMES."
+(defun lsp-hierarchy-test--reply-items (&rest names)
+  "Reply to the latest prepare or type request with items named NAMES."
   (lsp-hierarchy-test--reply
    (car lsp-hierarchy-test--sent)
    (vconcat (mapcar #'lsp-hierarchy-test--item names))))
@@ -127,18 +134,12 @@
   (funcall (lookup-key (get-text-property position 'keymap) [mouse-1])
            (list 'mouse-1 (list (selected-window) position '(0 . 0) 0))))
 
-(defun lsp-hierarchy-test--type-children (&rest names)
-  "Reply to the latest type relationship request with NAMES."
-  (lsp-hierarchy-test--reply
-   (car lsp-hierarchy-test--sent)
-   (vconcat (mapcar #'lsp-hierarchy-test--item names))))
-
 (ert-deftest lsp-hierarchy-latest-prepare-wins ()
   (lsp-hierarchy-test--with-session
     (let* ((view (lsp-hierarchy-test--show))
            (old (car lsp-hierarchy-test--sent)))
       (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "new")
+      (lsp-hierarchy-test--reply-items "new")
       (lsp-hierarchy-test--reply old (vector (lsp-hierarchy-test--item "old")))
       (with-current-buffer view
         (should (string-match-p "new" (buffer-string)))
@@ -153,10 +154,55 @@
       (should-not (buffer-live-p view))
       (should-not (get-buffer "*LSP Call Hierarchy*")))))
 
+(ert-deftest lsp-hierarchy-disposal-rejects-synchronous-late-response ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (let ((pending (car lsp-hierarchy-test--sent))
+            (old-view lsp-hierarchy--view)
+            (cancel (symbol-function 'lsp-hierarchy--cancel-request))
+            displayed)
+        ;; Cancellation can dispatch an already queued response before returning.
+        (cl-letf (((symbol-function 'lsp-hierarchy--cancel-request)
+                   (lambda (token)
+                     (lsp-hierarchy-test--reply pending (vector (lsp-hierarchy-test--item "stale")))
+                     (funcall cancel token)))
+                  ((symbol-function 'lsp-hierarchy--display)
+                   (lambda (_roots) (setq displayed t))))
+          (lsp-hierarchy-refresh))
+        (should-not displayed)
+        (should-not (eq old-view lsp-hierarchy--view))
+        (should (= 0 (hash-table-count (lsp-hierarchy--view-requests old-view))))
+        (should (eq (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading))
+        (lsp-hierarchy-test--reply-items "fresh")
+        (should (string-match-p "fresh" (buffer-string)))
+        (should-not (string-match-p "stale" (buffer-string)))))))
+
+(ert-deftest lsp-hierarchy-request-completes-only-once ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--reply-items "root")
+      (let (callbacks)
+        (cl-letf (((symbol-function 'lsp-request-async)
+                   (lambda (_method _params callback &rest options)
+                     (setq callbacks (list callback (plist-get options :error-handler)
+                                           (plist-get options :cancel-handler))))))
+          (lsp-hierarchy-test--toggle "root"))
+        (funcall (car callbacks) (vector (lsp-hierarchy-test--call "child")))
+        ;; Neither repeated success, failure nor cancellation may replace it.
+        (funcall (car callbacks) (vector (lsp-hierarchy-test--call "duplicate")))
+        (funcall (cadr callbacks) (lsp-make-json-error :code -32603 :message "Late failure"))
+        (funcall (nth 2 callbacks))
+        (let ((root (lsp-hierarchy-test--node "root")))
+          (should (eq (lsp-hierarchy--node-load-state root) 'loaded))
+          (should (equal (mapcar (lambda (node) (lsp-hierarchy--item-get node :name))
+                                 (lsp-hierarchy--node-children root))
+                         '("child"))))
+        (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))))))
+
 (ert-deftest lsp-hierarchy-error-is-retryable ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--reply-items "root")
       (lsp-hierarchy-test--toggle "root")
       (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
                                  (lsp-make-json-error :code -32603 :message "Server failure") t)
@@ -173,7 +219,7 @@
 (ert-deftest lsp-hierarchy-send-error-is-retryable ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--reply-items "root")
       (cl-letf (((symbol-function 'lsp--send-no-wait) (lambda (&rest _) (error "Send failed"))))
         (lsp-hierarchy-test--toggle "root"))
       (should (not (eq (lsp-hierarchy--node-load-state (lsp-hierarchy-test--node "root")) 'loading)))
@@ -185,7 +231,7 @@
 (ert-deftest lsp-hierarchy-source-kill-releases-pending-node ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--reply-items "root")
       (lsp-hierarchy-test--toggle "root")
       (kill-buffer lsp-hierarchy-test--source)
       (should (not (eq (lsp-hierarchy--node-load-state (lsp-hierarchy-test--node "root")) 'loading)))
@@ -213,7 +259,7 @@
         (with-current-buffer (lsp-hierarchy-test--show kind)
           (should (equal (plist-get (plist-get (car lsp-hierarchy-test--sent) :body) :method)
                          method))
-          (lsp-hierarchy-test--roots "foo")
+          (lsp-hierarchy-test--reply-items "foo")
           (lsp-hierarchy-test--toggle "foo")
           (should (= 2 (length lsp-hierarchy-test--sent))))))))
 
@@ -296,10 +342,7 @@
 (ert-deftest lsp-hierarchy-prepare-preserves-virtual-document-position ()
   (lsp-hierarchy-test--with-session
     (setq lsp-hierarchy-test--workspaces
-          (mapcar (lambda (id)
-                    (lsp-hierarchy-test--workspace
-                     id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
-                  '(server-a server-b)))
+          (lsp-hierarchy-test--type-workspaces 'server-a 'server-b))
     (let (view restrictions)
       (with-current-buffer lsp-hierarchy-test--source
         (insert "Heading\nSource block\n  target\n")
@@ -335,10 +378,7 @@
 (ert-deftest lsp-hierarchy-prepare-keeps-workspace-order-after-reversed-replies ()
   (lsp-hierarchy-test--with-session
     (setq lsp-hierarchy-test--workspaces
-          (mapcar (lambda (id)
-                    (lsp-hierarchy-test--workspace
-                     id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
-                  '(server-a server-b server-c)))
+          (lsp-hierarchy-test--type-workspaces 'server-a 'server-b 'server-c))
     (with-current-buffer (lsp-hierarchy-test--show 'type)
       (let ((requests (copy-sequence lsp-hierarchy-test--sent)))
         ;; The transport records newest first, reversing dispatch order.
@@ -348,7 +388,7 @@
                      (lsp--workspace-client (plist-get request :workspace)))))
             (lsp-hierarchy-test--reply request (vector (lsp-hierarchy-test--item (symbol-name id)))))))
       (should (eq 'ready (lsp-hierarchy--view-status lsp-hierarchy--view)))
-      (should (equal (mapcar #'lsp-hierarchy--node-name (lsp-hierarchy--view-roots lsp-hierarchy--view))
+      (should (equal (mapcar (lambda (node) (lsp-hierarchy--item-get node :name)) (lsp-hierarchy--view-roots lsp-hierarchy--view))
                      '("server-a" "server-b" "server-c")))
       (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))
 
@@ -357,10 +397,7 @@
     (dolist (error-first '(nil t))
       (lsp-hierarchy-test--with-session
         (setq lsp-hierarchy-test--workspaces
-              (mapcar (lambda (id)
-                        (lsp-hierarchy-test--workspace
-                         id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
-                      '(server-a server-b)))
+              (lsp-hierarchy-test--type-workspaces 'server-a 'server-b))
         (with-current-buffer (lsp-hierarchy-test--show 'type)
           (let* ((requests (copy-sequence lsp-hierarchy-test--sent))
                  (failed (car requests)))
@@ -379,10 +416,7 @@
   (dolist (sync-failures '(nil (server-a) (server-a server-b)))
     (lsp-hierarchy-test--with-session
       (setq lsp-hierarchy-test--workspaces
-            (mapcar (lambda (id)
-                      (lsp-hierarchy-test--workspace
-                       id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
-                    '(server-a server-b)))
+            (lsp-hierarchy-test--type-workspaces 'server-a 'server-b))
       (cl-letf (((symbol-function 'lsp--send-no-wait)
                  (lambda (body process)
                    (when (and (plist-get body :id) (memq process sync-failures))
@@ -403,10 +437,7 @@
   (dolist (refresh '(nil t))
     (lsp-hierarchy-test--with-session
       (setq lsp-hierarchy-test--workspaces
-            (mapcar (lambda (id)
-                      (lsp-hierarchy-test--workspace
-                       id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
-                    '(server-a server-b)))
+            (lsp-hierarchy-test--type-workspaces 'server-a 'server-b))
       (let* ((view (lsp-hierarchy-test--show 'type))
              (requests (copy-sequence lsp-hierarchy-test--sent))
              (pending (cadr requests))
@@ -433,10 +464,7 @@
 (ert-deftest lsp-hierarchy-partial-prepare-source-kill-exits-loading ()
   (lsp-hierarchy-test--with-session
     (setq lsp-hierarchy-test--workspaces
-          (mapcar (lambda (id)
-                    (lsp-hierarchy-test--workspace
-                     id (lsp-make-server-capabilities :type-hierarchy-provider? t)))
-                  '(server-a server-b)))
+          (lsp-hierarchy-test--type-workspaces 'server-a 'server-b))
     (with-current-buffer (lsp-hierarchy-test--show 'type)
       (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
                                  (vector (lsp-hierarchy-test--item "partial")))
@@ -453,7 +481,7 @@
   (dolist (errorp '(nil t))
     (lsp-hierarchy-test--with-session
       (with-current-buffer (lsp-hierarchy-test--show)
-        (lsp-hierarchy-test--roots "alpha" "beta")
+        (lsp-hierarchy-test--reply-items "alpha" "beta")
         (lsp-hierarchy-test--toggle "alpha")
         (let ((alpha-request (car lsp-hierarchy-test--sent)))
           (lsp-hierarchy-test--toggle "beta")
@@ -476,7 +504,7 @@
 (ert-deftest lsp-hierarchy-folding-survives-pending-descendants ()
   (lsp-hierarchy-test--with-session
    (with-current-buffer (lsp-hierarchy-test--show)
-     (lsp-hierarchy-test--roots "root")
+     (lsp-hierarchy-test--reply-items "root")
      (lsp-hierarchy-test--toggle "root")
      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
                                 (vector (lsp-hierarchy-test--call "alpha")
@@ -497,7 +525,7 @@
 (ert-deftest lsp-hierarchy-can-fold-while-node-is-loading ()
   (lsp-hierarchy-test--with-session
    (with-current-buffer (lsp-hierarchy-test--show)
-     (lsp-hierarchy-test--roots "root")
+     (lsp-hierarchy-test--reply-items "root")
      (lsp-hierarchy-test--toggle "root")
      (lsp-hierarchy-test--toggle "root")
      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
@@ -510,7 +538,7 @@
   (dolist (kind '(call type))
     (lsp-hierarchy-test--with-session
       (with-current-buffer (lsp-hierarchy-test--show kind)
-        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--reply-items "root")
         (let ((root (lsp-hierarchy-test--node "root"))
               jumped)
           (goto-char (lsp-hierarchy-test--node-position root))
@@ -594,7 +622,7 @@
     (lsp-hierarchy-test--with-session
       (let ((lsp-hierarchy-expand-depth depth))
         (with-current-buffer (lsp-hierarchy-test--show)
-          (lsp-hierarchy-test--roots "root")
+          (lsp-hierarchy-test--reply-items "root")
           (should (= (length lsp-hierarchy-test--sent) (if (= depth 0) 1 2)))
           (when (> depth 0)
             (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
@@ -605,7 +633,7 @@
   (lsp-hierarchy-test--with-session
    (let ((lsp-hierarchy-expand-depth 3))
      (with-current-buffer (lsp-hierarchy-test--show)
-       (lsp-hierarchy-test--roots "root")
+       (lsp-hierarchy-test--reply-items "root")
        (lsp-hierarchy-test--toggle "root")
        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
                                   (vector (lsp-hierarchy-test--call "child")))
@@ -617,7 +645,7 @@
     (unwind-protect
         (lsp-hierarchy-test--with-session
           (with-current-buffer (lsp-hierarchy-test--show)
-            (lsp-hierarchy-test--roots "root")
+            (lsp-hierarchy-test--reply-items "root")
             (lsp-hierarchy-test--toggle "root")
             (let ((uri (lsp--path-to-uri file))
                   (reads 0)
@@ -666,7 +694,7 @@
 (ert-deftest lsp-hierarchy-empty-node-becomes-a-leaf ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "empty" "next")
+      (lsp-hierarchy-test--reply-items "empty" "next")
       (lsp-hierarchy-test--toggle "empty")
       (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
       (font-lock-ensure)
@@ -703,7 +731,7 @@
 (ert-deftest lsp-hierarchy-shared-symbol-has-independent-occurrences ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "a" "b")
+      (lsp-hierarchy-test--reply-items "a" "b")
       (let ((item (lsp-hierarchy-test--item "shared")))
         (dolist (name '("a" "b"))
           (lsp-hierarchy-test--toggle name)
@@ -750,7 +778,7 @@
       (insert "first\nsecond\nthird\n")
       (goto-char 10))
     (with-current-buffer (lsp-hierarchy-test--show 'call t)
-      (lsp-hierarchy-test--roots "old")
+      (lsp-hierarchy-test--reply-items "old")
       (lsp-hierarchy-test--toggle "old")
       (let ((old-request (car lsp-hierarchy-test--sent))
             (old-origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
@@ -762,7 +790,7 @@
                (position (plist-get params :position)))
           (should (= 1 (plist-get position :line)))
           (should (= 3 (plist-get position :character))))
-        (lsp-hierarchy-test--roots "new")
+        (lsp-hierarchy-test--reply-items "new")
         (lsp-hierarchy-test--reply old-request (vector (lsp-hierarchy-test--call "stale")))
         (should-not (string-match-p "stale" (buffer-string)))
         (lsp-hierarchy-test--toggle "new")
@@ -774,7 +802,7 @@
     (unwind-protect
         (lsp-hierarchy-test--with-session
           (with-current-buffer (lsp-hierarchy-test--show)
-            (lsp-hierarchy-test--roots "root")
+            (lsp-hierarchy-test--reply-items "root")
             (let ((snapshot (lsp-hierarchy--source-snapshot file))
                   (origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
               (lsp-hierarchy-test--toggle "root")
@@ -791,7 +819,7 @@
   (lsp-hierarchy-test--with-session
     (with-current-buffer lsp-hierarchy-test--source (insert "target();\n"))
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "target")
+      (lsp-hierarchy-test--reply-items "target")
       (lsp-hierarchy-test--toggle "target")
       (lsp-hierarchy-test--reply
        (car lsp-hierarchy-test--sent)
@@ -816,7 +844,7 @@
 (ert-deftest lsp-hierarchy-navigates-parents-and-siblings-without-requests ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root" "other-root")
+      (lsp-hierarchy-test--reply-items "root" "other-root")
       (lsp-hierarchy-test--toggle "root")
       (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
                                  (vector (lsp-hierarchy-test--call "alpha")
@@ -846,7 +874,7 @@
   (dolist (fail '(nil t))
     (lsp-hierarchy-test--with-session
       (with-current-buffer (lsp-hierarchy-test--show)
-        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--reply-items "root")
         (lsp-hierarchy-test--toggle "root")
         (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
                                    (vector (lsp-hierarchy-test--call "branch")))
@@ -886,9 +914,9 @@
               (set-window-buffer origin-window view)
               (let ((inhibit-read-only t))
                 (lsp-hierarchy--insert-node
-                 (lsp-hierarchy--make-node :name "foo" :uri "custom://symbol"
-                                          :range (lsp-hierarchy-test--range 1 2 5)
-                                          :workspace workspace) 0))
+                 (let ((item (lsp-hierarchy-test--item "foo" "custom://symbol")))
+                   (lsp-put item :selectionRange (lsp-hierarchy-test--range 1 2 5))
+                   (lsp-hierarchy--symbol-node item workspace)) 0))
               (goto-char 3)
               (let ((xref-after-jump-hook (list (lambda () (setq jumped t)))))
                 (cl-letf (((symbol-function 'xref-push-marker-stack) (lambda () (setq pushed t))))
@@ -932,8 +960,8 @@
               (setq target (find-file-noselect file))
               (let ((inhibit-read-only t))
                 (lsp-hierarchy--insert-node
-                 (lsp-hierarchy--make-node :name "foo" :uri (lsp--path-to-uri file)
-                                          :range (lsp-hierarchy-test--range 0 0 3)) 0))
+                 (lsp-hierarchy--symbol-node
+                  (lsp-hierarchy-test--item "foo" (lsp--path-to-uri file)) nil) 0))
               (goto-char 3)
               (should-error (lsp-hierarchy-preview) :type 'user-error)
               (should (eq (window-buffer window) view))
@@ -947,7 +975,7 @@
     (lsp-hierarchy-test--with-session
       (with-current-buffer lsp-hierarchy-test--source (insert "target();\n"))
       (with-current-buffer (lsp-hierarchy-test--show)
-        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--reply-items "root")
         (lsp-hierarchy-test--toggle "root")
         (lsp-hierarchy-test--reply
          (car lsp-hierarchy-test--sent)
@@ -974,7 +1002,7 @@
               (lsp-hierarchy-test--click position)
               (should (= position (point)))
               (should (stringp (get-text-property position 'help-echo)))
-              (should (eq (key-binding (kbd "TAB")) #'lsp-hierarchy-smart-tab))
+              (should (eq (key-binding (kbd "TAB")) #'lsp-hierarchy-toggle))
               (should (eq (key-binding (kbd "?")) #'describe-mode))))
           (should (equal (nreverse actions)
                          (list (cons 'toggle root) (cons 'goto root) (cons 'goto caller)))))))))
@@ -982,7 +1010,7 @@
 (ert-deftest lsp-hierarchy-navigation-stays-on-final-leaf ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "leaf")
+      (lsp-hierarchy-test--reply-items "leaf")
       (lsp-hierarchy-test--toggle "leaf")
       (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
       (goto-char (point-min))
@@ -999,7 +1027,7 @@
   (lsp-hierarchy-test--with-session
     (with-current-buffer lsp-hierarchy-test--source (insert "target();\n"))
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--reply-items "root")
       (lsp-hierarchy-test--toggle "root")
       (lsp-hierarchy-test--reply
        (car lsp-hierarchy-test--sent)
@@ -1012,11 +1040,11 @@
         (move-to-column 9)
         (let ((position (point)))
           ;; A trailing Loading row is not a next symbol either.
-          (lsp-hierarchy-smart-tab)
+          (lsp-hierarchy-toggle)
           (should (= position (point))))
         (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
         (let ((position (point)))
-          (lsp-hierarchy-smart-tab)
+          (lsp-hierarchy-toggle)
           (lsp-hierarchy-next-line)
           (should (= position (point)))
           (should (equal (lsp-hierarchy--location-at-point)
@@ -1029,14 +1057,14 @@
                 (lsp-hierarchy--node-children caller) (list later))
           (lsp-hierarchy--render)
           (goto-char (lsp-hierarchy-test--site-position site))
-          (lsp-hierarchy-smart-tab)
+          (lsp-hierarchy-toggle)
           (should (eq (lsp-hierarchy--node-at-point) later)))))))
 
 (ert-deftest lsp-hierarchy-auto-expansion-stops-self-recursion-but-allows-manual-paths ()
   (lsp-hierarchy-test--with-session
     (let ((lsp-hierarchy-expand-depth 6))
       (with-current-buffer (lsp-hierarchy-test--show)
-        (lsp-hierarchy-test--roots "recursive")
+        (lsp-hierarchy-test--reply-items "recursive")
         (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
                                    (vector (lsp-hierarchy-test--call "recursive")))
         (let* ((root (car (lsp-hierarchy--view-roots lsp-hierarchy--view)))
@@ -1057,7 +1085,7 @@
   (lsp-hierarchy-test--with-session
     (let ((lsp-hierarchy-expand-depth 10))
       (with-current-buffer (lsp-hierarchy-test--show 'call t)
-        (lsp-hierarchy-test--roots "a")
+        (lsp-hierarchy-test--reply-items "a")
         (dolist (name '("b" "a"))
           (lsp-hierarchy-test--reply
            (car lsp-hierarchy-test--sent)
@@ -1066,7 +1094,7 @@
         (let* ((root (car (lsp-hierarchy--view-roots lsp-hierarchy--view)))
                (child (car (lsp-hierarchy--node-children root)))
                (recursive (car (lsp-hierarchy--node-children child))))
-          (should (equal (lsp-hierarchy--node-name recursive) "a"))
+          (should (equal (lsp-hierarchy--item-get recursive :name) "a"))
           (should-not (lsp-hierarchy--node-expanded recursive))
           (should (eq (lsp-hierarchy--node-load-state recursive) 'unloaded))
           (should (= 3 (length lsp-hierarchy-test--sent)))
@@ -1100,15 +1128,17 @@
   (dolist (kind '(call type))
     (lsp-hierarchy-test--with-session
       (with-current-buffer (lsp-hierarchy-test--show kind)
-        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--reply-items "root")
         (lsp-hierarchy-test--toggle "root")
-        (let ((pending (car lsp-hierarchy-test--sent))
-              (token (lsp-hierarchy--node-request (lsp-hierarchy-test--node "root"))))
+        (let* ((pending (car lsp-hierarchy-test--sent))
+               (request-id (plist-get (plist-get pending :body) :id))
+               (handlers (lsp--client-response-handlers
+                          (lsp--workspace-client (plist-get pending :workspace)))))
           (lsp-hierarchy-switch-direction)
           (should (equal (lsp-hierarchy--view-direction lsp-hierarchy--view)
-                         (if (eq kind 'call) t 'supertypes)))
-          (should-not (gethash token lsp--cancelable-requests))
-          (lsp-hierarchy-test--roots "root")
+                         (if (eq kind 'call) 'outgoing 'supertypes)))
+          (should-not (gethash request-id handlers))
+          (lsp-hierarchy-test--reply-items "root")
           (lsp-hierarchy-test--reply
            pending (vector (if (eq kind 'call)
                                (lsp-hierarchy-test--call "stale")
@@ -1122,7 +1152,7 @@
                          (if (eq kind 'call) "callHierarchy/outgoingCalls" "typeHierarchy/supertypes")))
           (lsp-hierarchy-switch-direction)
           (should (equal (lsp-hierarchy--view-direction lsp-hierarchy--view)
-                         (if (eq kind 'call) nil 'subtypes))))))))
+                         (if (eq kind 'call) 'incoming 'subtypes))))))))
 
 (ert-deftest lsp-hierarchy-four-query-directions-use-correct-methods ()
   (dolist (entry '((call nil "textDocument/prepareCallHierarchy" "callHierarchy/incomingCalls")
@@ -1133,7 +1163,7 @@
       (with-current-buffer (lsp-hierarchy-test--show (car entry) (cadr entry))
         (should (equal (plist-get (plist-get (car lsp-hierarchy-test--sent) :body) :method)
                        (nth 2 entry)))
-        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--reply-items "root")
         (lsp-hierarchy-test--toggle "root")
         (should (equal (plist-get (plist-get (car lsp-hierarchy-test--sent) :body) :method)
                        (nth 3 entry)))))))
@@ -1142,10 +1172,10 @@
   (lsp-hierarchy-test--with-session
     (let ((lsp-hierarchy-expand-depth 1))
       (with-current-buffer (lsp-hierarchy-test--show 'type)
-        (lsp-hierarchy-test--roots "root")
-        (lsp-hierarchy-test--type-children "child")
+        (lsp-hierarchy-test--reply-items "root")
+        (lsp-hierarchy-test--reply-items "child")
         (lsp-hierarchy-test--toggle "child")
-        (lsp-hierarchy-test--type-children "grandchild")
+        (lsp-hierarchy-test--reply-items "grandchild")
         (lsp-hierarchy-test--toggle "root")
         (let ((old-root (lsp-hierarchy-test--node "root"))
               (fresh (lsp-hierarchy-test--item "root" nil '(fresh-data))))
@@ -1155,7 +1185,7 @@
           (should (lsp-hierarchy--node-expanded (lsp-hierarchy-test--node "root")))
           (should (eq (plist-get (plist-get (plist-get (car lsp-hierarchy-test--sent) :body) :params) :item)
                       fresh))
-          (lsp-hierarchy-test--type-children "child")
+          (lsp-hierarchy-test--reply-items "child")
           (let ((child (lsp-hierarchy-test--node "child")))
             (should-not (lsp-hierarchy--node-expanded child))
             (should-not (lsp-hierarchy--node-children child)))
@@ -1164,7 +1194,7 @@
 (ert-deftest lsp-hierarchy-call-site-rows-navigate-and-jump-to-edge-locations ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--reply-items "root")
       (lsp-hierarchy-test--toggle "root")
       (lsp-hierarchy-test--reply
        (car lsp-hierarchy-test--sent)
@@ -1194,11 +1224,11 @@
 (ert-deftest lsp-hierarchy-redraw-keeps-cursor-or-falls-back-to-visible-parent ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show 'type)
-      (lsp-hierarchy-test--roots "alpha" "beta")
+      (lsp-hierarchy-test--reply-items "alpha" "beta")
       (lsp-hierarchy-test--toggle "alpha")
       (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "beta"))
       (move-to-column 5)
-      (lsp-hierarchy-test--type-children "child")
+      (lsp-hierarchy-test--reply-items "child")
       (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node "beta")))
       (should (= 5 (current-column)))
       (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "child"))

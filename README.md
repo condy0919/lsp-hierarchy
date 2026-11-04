@@ -87,9 +87,9 @@ Call-site text is read only for displayed call sites. Open source buffers supply
 
 ## Implementation
 
-A view owns its source marker, roots, requests, and source snapshots. Each node represents one occurrence of a symbol, with separate expansion and loading state. Its children are symbol nodes; its call sites are source locations on the incoming edge. The renderer inserts the visible tree directly into the buffer and uses text properties to associate rows with their model data. Ordinary redraws keep buffer point on the same row or its nearest visible ancestor.
+A view owns its source marker, roots, requests, and source snapshots; the marker identifies the source buffer. Each node represents one occurrence of a symbol, with separate expansion and loading state, and reads its metadata from the original LSP item. Its children are symbol nodes; its call sites are source locations on the incoming edge. The renderer inserts the visible tree directly into the buffer and uses text properties to associate rows with their model data. Ordinary redraws keep buffer point on the same row or its nearest visible ancestor.
 
-Protocol adapters retain each item's originating workspace and opaque server data. Prepare requests use each server's URI handling and negotiated position encoding, with separate cancellation tokens. Successful results are collected in workspace order; an empty response counts as success, and the query fails if all servers fail. Closing the source buffer during preparation cancels the query. View generations and request tokens reject replies belonging to a replaced or closed view.
+Protocol adapters retain each item's originating workspace and opaque server data. Prepare requests use each server's URI handling and negotiated position encoding, with separate cancellation tokens. Successful results are collected in workspace order; an empty response counts as success, and the query fails if all servers fail. Closing the source buffer during preparation cancels the query. Replies are accepted only for the current view object and a pending request token; disposal invalidates the view before cancelling its requests.
 
 ## Development
 
