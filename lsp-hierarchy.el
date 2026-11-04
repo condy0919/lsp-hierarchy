@@ -33,6 +33,7 @@
 (require 'outline)
 (require 'hierarchy)
 (require 'seq)
+(require 'xref)
 
 ;;; Customization
 
@@ -544,8 +545,12 @@ OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
                                    (lsp-hierarchy--call-hierarchy-children it s cb outgoing-or-direction err token))
                                (lambda (it s cb err token)
                                  (lsp-hierarchy--type-hierarchy-children it s cb outgoing-or-direction err token)))))
-            (when (eq view-type 'type)
-              (setq item (plist-put item :goto-fn (lambda () (lsp-hierarchy--open-file (lsp-get root :uri) (lsp-get root :range))))))
+            ;; selectionRange identifies the symbol name; range may also
+            ;; include its documentation and body.  Roots are navigable in
+            ;; both call and type views.
+            (setq item (plist-put item :goto-fn
+                                  (lambda () (lsp-hierarchy--open-file
+                                              (lsp-get root :uri) (lsp-get root :selectionRange) workspace))))
 
             ;; hierarchy.el uses equal keys.  Store stable IDs there and use
             ;; identity-based state tables: workspace state and closures can
@@ -587,15 +592,19 @@ OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
           (with-temp-buffer (insert-file-contents filename) (funcall get-fn)))
       (error (format "call at line %d" (1+ line-n))))))
 
-(defun lsp-hierarchy--open-file (uri range)
-  "Open file at URI and jump to RANGE."
-  (let ((win (get-mru-window (selected-frame) nil t)))
-    (if win
-        (select-window win)
-      (split-window-right))
-    (find-file (lsp--uri-to-path uri))
-    (goto-char (lsp--position-to-point (lsp-get range :start)))
-    (recenter)))
+(defun lsp-hierarchy--open-file (uri range &optional workspace)
+  "Open URI at RANGE using WORKSPACE's URI handling and xref history."
+  (let ((filename (with-lsp-workspace workspace (lsp--uri-to-path uri))))
+    (xref-push-marker-stack)
+    (pop-to-buffer (find-file-noselect filename)
+                   '((display-buffer-reuse-window display-buffer-pop-up-window)
+                     (inhibit-same-window . t)))
+    (let ((target (save-restriction
+                    (widen)
+                    (lsp--position-to-point (lsp-get range :start)))))
+      (unless (<= (point-min) target (point-max)) (widen))
+      (goto-char target))
+    (run-hooks 'xref-after-jump-hook)))
 
 (defun lsp-hierarchy--call-hierarchy-children (item sb callback outgoing &optional error-handler token)
   "Fetch children for call hierarchy ITEM.
@@ -620,13 +629,13 @@ ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
                              :kind (lsp-get tar :kind)
                              :lsp-item tar
                              :type 'symbol
-                             :goto-fn (lambda () (lsp-hierarchy--open-file uri (lsp-get tar :selectionRange)))
+                             :goto-fn (lambda () (lsp-hierarchy--open-file uri (lsp-get tar :selectionRange) workspace))
                              :children (mapcar (lambda (r)
                                                  (list :id (make-symbol "lsp-hierarchy-node") :workspace workspace
                                                        :label (with-lsp-workspace workspace
                                                                 (lsp-hierarchy--extract-line call-uri r))
                                                        :type 'code
-                                                       :goto-fn (lambda () (lsp-hierarchy--open-file call-uri r))))
+                                                       :goto-fn (lambda () (lsp-hierarchy--open-file call-uri r workspace))))
                                                (append (lsp-get call :fromRanges) nil))
                              :children-fn (lambda (it s cb err token)
                                              (lsp-hierarchy--call-hierarchy-children it s cb outgoing err token)))))
@@ -706,7 +715,7 @@ ERROR-HANDLER handles failures; TOKEN identifies the cancellable request."
                                   :kind (lsp-get it :kind)
                                   :lsp-item it
                                   :type 'symbol
-                                  :goto-fn (lambda () (lsp-hierarchy--open-file (lsp-get it :uri) (lsp-get it :range)))
+                                  :goto-fn (lambda () (lsp-hierarchy--open-file (lsp-get it :uri) (lsp-get it :selectionRange) workspace))
                                   :children-fn (lambda (it sb cb err token)
                                                   (lsp-hierarchy--type-hierarchy-children it sb cb direction err token))))
                           res)))

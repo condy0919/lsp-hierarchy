@@ -346,5 +346,33 @@
       (lsp-hierarchy-test--toggle "root")
       (should-not (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child")))))))
 
+(ert-deftest lsp-hierarchy-symbol-jumps-use-selection-range ()
+  (dolist (kind '(call type))
+    (lsp-hierarchy-test--with-session
+      (with-current-buffer (lsp-hierarchy-test--show kind)
+        (lsp-hierarchy-test--roots "root")
+        (let ((root (lsp-hierarchy-test--node "root"))
+              jumped)
+          (goto-char (lsp-hierarchy-test--node-position root))
+          (cl-letf (((symbol-function 'lsp-hierarchy--open-file)
+                     (lambda (uri range workspace)
+                       (setq jumped (list uri range workspace)))))
+            (lsp-hierarchy-goto))
+          (should (eq (nth 1 jumped) (lsp-get (plist-get root :lsp-item) :selectionRange)))
+          (should (eq (nth 2 jumped) (plist-get root :workspace))))))))
+
+(ert-deftest lsp-hierarchy-type-child-jump-selects-name ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show 'type)
+      (lsp-hierarchy-test--roots "Root")
+      (lsp-hierarchy-test--toggle "Root")
+      (let ((child (lsp-hierarchy-test--item "Child")) jumped)
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) (vector child))
+        (goto-char (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "Child")))
+        (cl-letf (((symbol-function 'lsp-hierarchy--open-file)
+                   (lambda (_uri range &optional _workspace) (setq jumped range))))
+          (lsp-hierarchy-goto))
+        (should (eq jumped (lsp-get child :selectionRange)))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
