@@ -931,6 +931,7 @@ Keep point unchanged when there is no later symbol."
     (define-key map (kbd "SPC") #'lsp-hierarchy-preview)
     (define-key map (kbd "s") #'lsp-hierarchy-cycle-sort)
     (define-key map (kbd "/") #'lsp-hierarchy-filter)
+    (define-key map (kbd "d") #'lsp-hierarchy-switch-direction)
     (define-key map (kbd "g") #'lsp-hierarchy-refresh)
     (define-key map (kbd "?") #'describe-mode)
     map)
@@ -1385,6 +1386,31 @@ still loading the missing path, or prepare has failed and remains retryable."
                        (when (car result) (set-window-point window (car result)))
                        (and (cdr result) entry)))))
                (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view)))))
+
+(defun lsp-hierarchy-switch-direction ()
+  "Switch between callers/callees or subtypes/supertypes at the same origin.
+Start a fresh tree for the new relationships while retaining this view's
+sorting, filtering, and other display preferences."
+  (interactive)
+  (unless (and (derived-mode-p 'lsp-hierarchy-mode) lsp-hierarchy--view)
+    (user-error "Not in a hierarchy view"))
+  (let* ((target (current-buffer))
+         (kind (lsp-hierarchy--view-kind lsp-hierarchy--view))
+         (previous (lsp-hierarchy--view-direction lsp-hierarchy--view))
+         (direction (if (eq kind 'call) (not previous)
+                      (if (eq previous 'supertypes) 'subtypes 'supertypes)))
+         (origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
+    (unless (and (markerp origin) (marker-buffer origin))
+      (user-error "The hierarchy source buffer has been killed"))
+    (save-selected-window
+      (with-current-buffer (marker-buffer origin)
+        (save-restriction
+          (widen)
+          (save-excursion
+            (goto-char origin)
+            ;; Opposite relationships have different paths: expansion and
+            ;; pending focus from the previous direction must not be restored.
+            (lsp-hierarchy--prepare kind direction target)))))))
 
 (defun lsp-hierarchy-refresh (&optional reset)
   "Refresh this view at its original source position.

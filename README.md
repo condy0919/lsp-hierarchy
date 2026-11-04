@@ -57,6 +57,7 @@ You can bind the primary commands to your preferred keys or add them to the `lsp
 | `u` | Move to the parent node. |
 | `M-n` / `M-p` | Move between visible siblings, skipping descendants. |
 | Left arrow | Fold the current branch, or move to its parent if already closed. |
+| `d` | Switch between callers/callees or subtypes/supertypes at the original query position. |
 | `g` | Refresh while restoring matching branches and the selected location. |
 | `C-u g` | Refresh with the initial expansion depth, discarding saved tree state. |
 | `s` | Cycle through server order, name order, and source location order. |

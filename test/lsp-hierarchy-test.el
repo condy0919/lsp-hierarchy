@@ -2523,5 +2523,66 @@
         (should (eq (lsp-hierarchy--node-load-state child) 'unloaded))))))
 
 
+(ert-deftest lsp-hierarchy-direction-switch-resets-paths-and-cancels-old-requests ()
+  (dolist (kind '(call type))
+    (lsp-hierarchy-test--with-session
+      (with-current-buffer (lsp-hierarchy-test--show kind)
+        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--toggle "root")
+        (let ((pending (car lsp-hierarchy-test--sent))
+              (token (lsp-hierarchy--node-request (lsp-hierarchy-test--node "root"))))
+          (setq-local lsp-hierarchy-sort-order 'name
+                      lsp-hierarchy-filter-regexp "root")
+          (lsp-hierarchy-switch-direction)
+          (should (equal (lsp-hierarchy--view-direction lsp-hierarchy--view)
+                         (if (eq kind 'call) t 'supertypes)))
+          (should-not (lsp-hierarchy--view-restore lsp-hierarchy--view))
+          (should-not (gethash token lsp--cancelable-requests))
+          (lsp-hierarchy-test--roots "root")
+          (lsp-hierarchy-test--reply
+           pending (vector (if (eq kind 'call)
+                               (lsp-hierarchy-test--call "stale")
+                             (lsp-hierarchy-test--item "stale"))))
+          (should (= 1 (length (lsp-hierarchy--view-roots lsp-hierarchy--view))))
+          (let ((root (lsp-hierarchy-test--node "root")))
+            (should-not (lsp-hierarchy--node-expanded root))
+            (should-not (lsp-hierarchy--node-children root)))
+          (should (eq lsp-hierarchy-sort-order 'name))
+          (should (equal lsp-hierarchy-filter-regexp "root"))
+          (lsp-hierarchy-test--toggle "root")
+          (should (equal (plist-get (plist-get (car lsp-hierarchy-test--sent) :body) :method)
+                         (if (eq kind 'call) "callHierarchy/outgoingCalls" "typeHierarchy/supertypes")))
+          (lsp-hierarchy-switch-direction)
+          (should (equal (lsp-hierarchy--view-direction lsp-hierarchy--view)
+                         (if (eq kind 'call) nil 'subtypes))))))))
+
+(ert-deftest lsp-hierarchy-direction-switch-keeps-origin-source-and-window-focus ()
+  (lsp-hierarchy-test--with-session
+    (save-window-excursion
+      (delete-other-windows)
+      (with-current-buffer lsp-hierarchy-test--source
+        (insert "abcdefghi\n")
+        (goto-char 2))
+      (let* ((view (lsp-hierarchy-test--show))
+             (source-window (selected-window))
+             (tree-window (split-window-right)))
+        (set-window-buffer source-window lsp-hierarchy-test--source)
+        (set-window-buffer tree-window view)
+        (with-current-buffer lsp-hierarchy-test--source
+          (narrow-to-region 3 8)
+          (goto-char 5))
+        (with-current-buffer view
+          (lsp-hierarchy-test--roots "root")
+          (lsp-hierarchy-switch-direction)
+          (should (= (marker-position (lsp-hierarchy--view-origin lsp-hierarchy--view)) 2)))
+        (should (eq (selected-window) source-window))
+        (should (eq (window-buffer source-window) lsp-hierarchy-test--source))
+        (with-current-buffer lsp-hierarchy-test--source
+          (should (buffer-narrowed-p))
+          (should (= (point) 5)))
+        (let ((params (plist-get (plist-get (car lsp-hierarchy-test--sent) :body) :params)))
+          (should (= (plist-get (plist-get params :position) :character) 1)))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

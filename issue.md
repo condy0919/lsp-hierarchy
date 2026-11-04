@@ -165,6 +165,12 @@
   - **原地切换方向**（Incoming $\leftrightarrow$ Outgoing，Subtypes $\leftrightarrow$ Supertypes）；
   - **以当前光标下的节点为新 Root 重新展开层次树**（无需先 `RET` 跳回源文件再执行 `M-x lsp-hierarchy-show-*`）。
 
+**核查与处理（功能缺口，方向切换已补充）**
+
+- 这两项此前均未提供，属于功能建议，不是既有命令的错误。
+- 新增 `lsp-hierarchy-switch-direction`（`d`），在原始查询 marker 处重新 prepare 相反方向，取消旧请求并丢弃不适用于新方向的展开路径；保留排序/过滤等显示偏好及窗口焦点。
+- 验证：覆盖 call/type 双向切换、旧响应隔离、原始位置与源 buffer narrowing、后台窗口不抢焦点；117 项 ERT 全部通过。重设根节点作为下一独立提交处理。
+
 ### 4. 支持 LSP 3.16+ `SymbolTag`（如 Deprecated 符号样式）与键盘用户的同名符号消歧
 - `CallHierarchyItem` / `TypeHierarchyItem` 支持 `:tags`（如 `SymbolTag.Deprecated = 1`），可为废弃符号添加删除线属性。
 - 对于同名且无 `:detail` 的符号，目前仅能通过鼠标悬停 `help-echo` 查看 URI 区分，终端或纯键盘用户较难直观区分，可考虑支持可选的简短文件名/路径后缀显示。
