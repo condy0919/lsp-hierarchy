@@ -135,6 +135,9 @@ several paths lead to the same protocol item."
 (defvar-local lsp-hierarchy--view nil
   "The model and resources owned by this buffer.")
 
+(defvar-local lsp-hierarchy-sort-order nil
+  "Sibling order in this view: nil for server order, `name', or `location'.")
+
 (defun lsp-hierarchy--cancel-request (token)
   "Cancel TOKEN and release handlers even when sending cancellation fails."
   ;; Keep this compatibility boundary until lsp-mode's cancellation cleanup
@@ -344,13 +347,45 @@ Show the URI and a line number starting at one, without reading files."
         (and (lsp-hierarchy--node-expanded parent)
              (lsp-hierarchy--visible-p parent)))))
 
+(defun lsp-hierarchy--location-less-p (left right)
+  "Return non-nil if LEFT precedes RIGHT by URI and source position."
+  (let ((left-uri (or (lsp-hierarchy--node-uri left) ""))
+        (right-uri (or (lsp-hierarchy--node-uri right) ""))
+        (left-start (lsp-get (lsp-hierarchy--node-range left) :start))
+        (right-start (lsp-get (lsp-hierarchy--node-range right) :start)))
+    (if (equal left-uri right-uri)
+        (let ((left-line (or (lsp-get left-start :line) 0))
+              (right-line (or (lsp-get right-start :line) 0)))
+          (if (= left-line right-line)
+              (< (or (lsp-get left-start :character) 0)
+                 (or (lsp-get right-start :character) 0))
+            (< left-line right-line)))
+      (string-lessp left-uri right-uri))))
+
+(defun lsp-hierarchy--display-nodes (nodes)
+  "Return NODES in presentation order without changing the model lists."
+  (if (null lsp-hierarchy-sort-order)
+      nodes
+    (let* ((symbol-p (lambda (node) (eq (lsp-hierarchy--node-type node) 'symbol)))
+           (symbols (seq-filter symbol-p nodes))
+           (sites (seq-remove symbol-p nodes)))
+      ;; Stable sorting keeps server order for equal keys.  Call sites
+      ;; retain source order before the independently sorted symbols.
+      (append sites
+              (cl-stable-sort
+               symbols (if (eq lsp-hierarchy-sort-order 'location)
+                           #'lsp-hierarchy--location-less-p
+                         (lambda (left right)
+                           (string-lessp (lsp-hierarchy--node-name left)
+                                         (lsp-hierarchy--node-name right)))))))))
+
 (defun lsp-hierarchy--insert-subtree (node indent)
   "Render NODE and its visible descendants at INDENT."
   (lsp-hierarchy--insert-node node indent)
   (when (lsp-hierarchy--node-expanded node)
     ;; Call sites are already known from the incoming edge.  They remain
     ;; usable while the next level of relationships is loading or fails.
-    (dolist (child (lsp-hierarchy--node-children node))
+    (dolist (child (lsp-hierarchy--display-nodes (lsp-hierarchy--node-children node)))
       (lsp-hierarchy--insert-subtree child (1+ indent)))
     (when (memq (lsp-hierarchy--node-load-state node) '(loading error))
       (let* ((loading (eq (lsp-hierarchy--node-load-state node) 'loading))
@@ -402,6 +437,7 @@ can insert rows anywhere above the user's current position."
          (close-icon lsp-hierarchy-icon-close)
          (open-icon lsp-hierarchy-icon-open)
          (detailed lsp-hierarchy-detailed-outline)
+         (sort-order lsp-hierarchy-sort-order)
          (anchor (lsp-hierarchy--anchor (point)))
          (windows (mapcar (lambda (window)
                             (list window
@@ -412,13 +448,14 @@ can insert rows anywhere above the user's current position."
                  (setq-local lsp-hierarchy--view view
                              lsp-hierarchy-icon-close close-icon
                              lsp-hierarchy-icon-open open-icon
-                             lsp-hierarchy-detailed-outline detailed)
+                             lsp-hierarchy-detailed-outline detailed
+                             lsp-hierarchy-sort-order sort-order)
                  (pcase (lsp-hierarchy--view-status view)
                    ('loading (insert "Loading hierarchy...\n"))
                    ('error (insert "Unable to load hierarchy: "
                                    (lsp-hierarchy--error-message (lsp-hierarchy--view-error view)) "\n"))
                    (_ (if (lsp-hierarchy--view-roots view)
-                          (dolist (node (lsp-hierarchy--view-roots view))
+                          (dolist (node (lsp-hierarchy--display-nodes (lsp-hierarchy--view-roots view)))
                             (lsp-hierarchy--insert-subtree node 0))
                         (insert "No hierarchy found.\n"))))
                  (buffer-string))))
@@ -444,6 +481,19 @@ can insert rows anywhere above the user's current position."
   (let ((action (get-text-property (point) 'lsp-hierarchy-action)))
     (unless action (user-error "No hierarchy action here"))
     (call-interactively action)))
+
+(defun lsp-hierarchy-cycle-sort ()
+  "Cycle this view through server, name, and source location order."
+  (interactive)
+  (let ((previous lsp-hierarchy-sort-order))
+    (setq lsp-hierarchy-sort-order
+          (pcase previous ('nil 'name) ('name 'location) (_ nil)))
+    (condition-case err
+        (lsp-hierarchy--render)
+      (error
+       (setq lsp-hierarchy-sort-order previous)
+       (signal (car err) (cdr err))))
+    (message "Hierarchy order: %s" (or lsp-hierarchy-sort-order 'server))))
 
 (defun lsp-hierarchy--expandable-p (node)
   "Return non-nil if NODE has children or has not yet resolved them.
@@ -698,6 +748,7 @@ Preview does not add an xref history entry or run jump hooks."
     (define-key map (kbd "<tab>") #'lsp-hierarchy-smart-tab)
     (define-key map (kbd "RET") #'lsp-hierarchy-goto)
     (define-key map (kbd "SPC") #'lsp-hierarchy-preview)
+    (define-key map (kbd "s") #'lsp-hierarchy-cycle-sort)
     (define-key map (kbd "g") #'lsp-hierarchy-refresh)
     (define-key map (kbd "?") #'describe-mode)
     map)

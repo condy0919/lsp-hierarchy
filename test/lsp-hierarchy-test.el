@@ -1283,5 +1283,80 @@
             (should (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child")))))))))
 
 
+(defun lsp-hierarchy-test--visible-nodes ()
+  "Return model nodes in the order their rows appear."
+  (save-excursion
+    (goto-char (point-min))
+    (let (nodes)
+      (while (not (eobp))
+        (when-let* ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
+          (push node nodes))
+        (forward-line 1))
+      (nreverse nodes))))
+
+(ert-deftest lsp-hierarchy-sort-is-stable-and-preserves-model-order ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "z" "b" "a" "b")
+      (let* ((roots (lsp-hierarchy--view-roots lsp-hierarchy--view))
+             (server-order (copy-sequence roots))
+             (selected (nth 3 roots))
+             (requests (length lsp-hierarchy-test--sent)))
+        (lsp-hierarchy--goto-node selected)
+        (lsp-hierarchy-cycle-sort)
+        (should (equal (lsp-hierarchy-test--visible-nodes)
+                       (list (nth 2 roots) (nth 1 roots) (nth 3 roots) (nth 0 roots))))
+        (should (eq selected (lsp-hierarchy--node-at-point)))
+        ;; Identical locations preserve the server's original tie order.
+        (lsp-hierarchy-cycle-sort)
+        (should (equal (lsp-hierarchy-test--visible-nodes) server-order))
+        (lsp-hierarchy-cycle-sort)
+        (should-not lsp-hierarchy-sort-order)
+        (should (equal (lsp-hierarchy-test--visible-nodes) server-order))
+        (should (eq roots (lsp-hierarchy--view-roots lsp-hierarchy--view)))
+        (should (equal roots server-order))
+        (should (= requests (length lsp-hierarchy-test--sent)))))))
+
+(ert-deftest lsp-hierarchy-sort-keeps-call-sites-and-orders-locations ()
+  (with-temp-buffer
+    (lsp-hierarchy-mode)
+    (let* ((first-site (lsp-hierarchy--make-node :type 'code :range (lsp-hierarchy-test--range 1 0 1)))
+           (second-site (lsp-hierarchy--make-node :type 'code :range (lsp-hierarchy-test--range 2 0 1)))
+           (far (lsp-hierarchy--make-node :type 'symbol :name "a" :uri "file:///b.c"
+                                        :range (lsp-hierarchy-test--range 0 0 1) :load-state 'loaded))
+           (late (lsp-hierarchy--make-node :type 'symbol :name "b" :uri "file:///a.c"
+                                         :range (lsp-hierarchy-test--range 10 0 1) :load-state 'loaded))
+           (early (lsp-hierarchy--make-node :type 'symbol :name "c" :uri "file:///a.c"
+                                          :range (lsp-hierarchy-test--range 2 0 1) :load-state 'loaded))
+           (later-column (lsp-hierarchy--make-node :type 'symbol :name "d" :uri "file:///a.c"
+                                                  :range (lsp-hierarchy-test--range 2 3 4) :load-state 'loaded))
+           (children (list first-site second-site far late later-column early))
+           (root (lsp-hierarchy--make-node :type 'symbol :name "root" :expanded t
+                                         :load-state 'loaded :children children)))
+      (setf (lsp-hierarchy--view-roots lsp-hierarchy--view) (list root))
+      (lsp-hierarchy--register-node root)
+      (cl-letf (((symbol-function 'lsp-hierarchy--extract-line) (lambda (&rest _) "call();")))
+        (lsp-hierarchy--render)
+        (lsp-hierarchy-cycle-sort)
+        (should (equal (lsp-hierarchy-test--visible-nodes)
+                       (list root first-site second-site far late early later-column)))
+        (lsp-hierarchy-cycle-sort)
+        (should (equal (lsp-hierarchy-test--visible-nodes)
+                       (list root first-site second-site early later-column late far))))
+      (should (eq children (lsp-hierarchy--node-children root)))
+      (should (equal children (list first-site second-site far late later-column early))))))
+
+(ert-deftest lsp-hierarchy-sort-errors-preserve-display-and-order ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "second" "first")
+      (let ((before (buffer-string)))
+        (cl-letf (((symbol-function 'lsp-hierarchy--insert-node)
+                   (lambda (&rest _) (error "Render failure"))))
+          (should-error (lsp-hierarchy-cycle-sort)))
+        (should-not lsp-hierarchy-sort-order)
+        (should (equal before (buffer-string)))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
