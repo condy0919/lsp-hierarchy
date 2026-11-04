@@ -1240,5 +1240,48 @@
         (should (= 4 (count-lines (point-min) (point-max))))
         (should (= 3 (length lsp-hierarchy-test--sent)))))))
 
+(ert-deftest lsp-hierarchy-batch-redraw-failure-keeps-request-owners ()
+  (dolist (root-batch '(nil t))
+    (lsp-hierarchy-test--with-session
+      (let ((lsp-hierarchy-expand-depth 3))
+        (with-current-buffer (lsp-hierarchy-test--show)
+          (unless root-batch (lsp-hierarchy-test--roots "root"))
+          (let ((render (symbol-function 'lsp-hierarchy--render)) failed)
+            (cl-letf (((symbol-function 'lsp-hierarchy--render)
+                       (lambda ()
+                         (if (and (not failed)
+                                  (> (hash-table-count
+                                      (lsp-hierarchy--view-requests lsp-hierarchy--view)) 1))
+                             (progn (setq failed t) (error "Batch redraw failed"))
+                           (funcall render)))))
+              (if root-batch
+                  (lsp-hierarchy-test--roots "a" "b")
+                (lsp-hierarchy-test--reply
+                 (car lsp-hierarchy-test--sent)
+                 (vector (lsp-hierarchy-test--call "a")
+                         (lsp-hierarchy-test--call "b")))))
+            (should failed))
+          (should (eq (lsp-hierarchy--view-status lsp-hierarchy--view) 'ready))
+          (let* ((parent (lsp-hierarchy-test--node (if root-batch "b" "root")))
+                 (b (lsp-hierarchy-test--node "b"))
+                 (request (car lsp-hierarchy-test--sent))
+                 (sent (length lsp-hierarchy-test--sent)))
+            (unless root-batch
+              (should (eq (lsp-hierarchy--node-load-state parent) 'loaded)))
+            ;; A fold must remain a fold, not retry a falsely failed parent.
+            (lsp-hierarchy--goto-node parent)
+            (lsp-hierarchy-toggle)
+            (should (= sent (length lsp-hierarchy-test--sent)))
+            (lsp-hierarchy-test--reply request (vector (lsp-hierarchy-test--call "child")))
+            (let ((child (lsp-hierarchy-test--node "child")))
+              (should (eq (lsp-hierarchy--node-parent child) b))
+              (should (memq child (lsp-hierarchy--node-children b))))
+            (should (= sent (length lsp-hierarchy-test--sent)))
+            (should (= (hash-table-count (lsp-hierarchy--view-nodes lsp-hierarchy--view))
+                       (if root-batch 3 4)))
+            (lsp-hierarchy-test--toggle (if root-batch "b" "root"))
+            (should (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child")))))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

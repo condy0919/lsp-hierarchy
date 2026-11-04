@@ -541,6 +541,16 @@ A loading or failed branch is folded without cancelling or retrying it."
 (defvar lsp-hierarchy--batch-loading nil
   "Non-nil while starting a group of automatic expansion requests.")
 
+(defun lsp-hierarchy--render-expansion ()
+  "Publish automatic expansion states without invalidating loaded data."
+  ;; Requests have already started and their nodes are registered.  A display
+  ;; error here must not turn a successful parent response into a failed one:
+  ;; retrying that parent would replace children whose requests are still live.
+  (condition-case err
+      (lsp-hierarchy--render)
+    (error (message "LSP hierarchy: could not redraw expansion: %s"
+                    (lsp-hierarchy--error-message err)))))
+
 (defun lsp-hierarchy--expand-nodes (nodes depth)
   "Start expansion of NODES to DEPTH and publish their loading states together."
   (when nodes
@@ -549,7 +559,7 @@ A loading or failed branch is folded without cancelling or retrying it."
     (let ((lsp-hierarchy--batch-loading t))
       (dolist (node nodes)
         (lsp-hierarchy--load-async node depth)))
-    (unless lsp-hierarchy--batch-loading (lsp-hierarchy--render))))
+    (unless lsp-hierarchy--batch-loading (lsp-hierarchy--render-expansion))))
 
 (defun lsp-hierarchy--load-async (node &optional depth)
   "Load NODE's children, automatically expanding at most DEPTH levels."
