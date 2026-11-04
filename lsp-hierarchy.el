@@ -150,6 +150,9 @@ its identity; view roots and parent/child links own the model."
   "Regexp matching loaded symbol names and details, or nil for all nodes.
 Filtering reveals matching ancestor paths without changing expansion state.")
 
+(defvar-local lsp-hierarchy--header-line nil
+  "Direction, sort order and filter of the last successful render.")
+
 (defvar-local lsp-hierarchy--row-positions nil
   "Positions of the currently displayed node and status rows, keyed by node.")
 
@@ -563,6 +566,13 @@ can insert rows anywhere above the user's current position."
       (when (window-live-p (car entry))
         (set-window-start (car entry) (lsp-hierarchy--anchor-position (nth 1 entry)) t)
         (set-window-point (car entry) (lsp-hierarchy--anchor-position (nth 2 entry)))))
+    (setq lsp-hierarchy--header-line
+          (format " %s | Sort: %s | Filter: %s"
+                  mode-name (or lsp-hierarchy-sort-order 'server)
+                  (if lsp-hierarchy-filter-regexp
+                      (prin1-to-string lsp-hierarchy-filter-regexp)
+                    "none")))
+    (force-mode-line-update)
     (set-buffer-modified-p nil)
     (lsp-hierarchy--restore-focus)))
 
@@ -932,6 +942,9 @@ Failed requests can be retried by clicking their status row.
   (setq-local indent-tabs-mode nil)
   (setq-local truncate-lines t)
   (setq-local revert-buffer-function #'lsp-hierarchy--revert)
+  ;; A symbol's string value is literal in mode/header lines, so percent
+  ;; constructs in a user's regexp cannot expand into unrelated buffer data.
+  (setq-local header-line-format '("" lsp-hierarchy--header-line))
 
   (setq-local lsp-hierarchy--view (lsp-hierarchy--make-view))
   (add-hook 'pre-command-hook #'lsp-hierarchy--before-command nil t)

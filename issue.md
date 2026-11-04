@@ -150,6 +150,12 @@
 ### 2. 缺少视图状态（过滤条件 / 排序方式 / 层次方向）的直观展示
 - 当前激活 `/` 过滤（`lsp-hierarchy-filter-regexp`）或 `s` 切换排序（`lsp-hierarchy-sort-order`）后，除了回显区短暂的 `message` 外，Buffer 和 Mode-line 没有任何持久标识。建议利用 `header-line-format` 或 `mode-line-process` 展示当前的排序模式与过滤正则。
 
+**核查与处理（部分成立，已补充）**
+
+- 排序与过滤确实缺少持久提示；层级方向原本已通过 `mode-name` 显示在 mode line，并非完全没有标识。
+- 新增 header line，统一显示方向、当前排序和过滤正则。状态在成功渲染后更新，渲染失败不会提前显示未生效的选项；通过符号的字面字符串值显示正则，避免 `%b` 等被解释成 mode-line 替换。
+- 验证：检查初始状态、排序切换、含 `%` 的正则及清空过滤后的状态；113 项 ERT 全部通过。
+
 ### 3. 支持在 Hierarchy 视图内直接切换方向或以当前节点重设根节点（Re-root）
 - 在探索深层调用链或类型树时，常见的两个高频操作是：
   - **原地切换方向**（Incoming $\leftrightarrow$ Outgoing，Subtypes $\leftrightarrow$ Supertypes）；
