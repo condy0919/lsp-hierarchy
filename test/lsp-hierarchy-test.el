@@ -976,6 +976,28 @@
         (should (eq (lsp-hierarchy--node-at-point) caller))
         (should (= requests (length lsp-hierarchy-test--sent)))))))
 
+(ert-deftest lsp-hierarchy-goto-node-uses-current-row-index ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "first" "last")
+      (let ((first (lsp-hierarchy-test--node "first"))
+            (last (lsp-hierarchy-test--node "last")))
+        (cl-letf (((symbol-function 'text-property-any)
+                   (lambda (&rest _) (ert-fail "Indexed navigation must not scan text"))))
+          (dolist (node (list last first))
+            (lsp-hierarchy--goto-node node)
+            (should (bolp))
+            (should (eq (lsp-hierarchy--node-at-point) node))))
+        ;; Without an index, existing rows must remain navigable.
+        (setq lsp-hierarchy--row-positions nil)
+        (lsp-hierarchy--goto-node last)
+        (should (bolp))
+        (should (eq (lsp-hierarchy--node-at-point) last))
+        (lsp-hierarchy-filter "^first$")
+        (let ((position (point)))
+          (should-error (lsp-hierarchy--goto-node last) :type 'user-error)
+          (should (= position (point))))))))
+
 (ert-deftest lsp-hierarchy-sibling-navigation-follows-visible-order ()
   (lsp-hierarchy-test--with-session
     (with-current-buffer (lsp-hierarchy-test--show)
@@ -993,6 +1015,13 @@
         (should (eq (lsp-hierarchy--node-at-point) first))
         (lsp-hierarchy-previous-sibling)
         (should (eq (lsp-hierarchy--node-at-point) last))
+        ;; A stale position can also lie inside the correct row.  It must
+        ;; not leave navigation at the old column instead of the row start.
+        (puthash first (cons (+ 2 (lsp-hierarchy-test--node-position first)) nil)
+                 lsp-hierarchy--row-positions)
+        (lsp-hierarchy--goto-node first)
+        (should (bolp))
+        (should (eq (lsp-hierarchy--node-at-point) first))
         (should (= 1 (length lsp-hierarchy-test--sent)))))))
 
 (ert-deftest lsp-hierarchy-preview-preserves-focus-and-xref-history ()

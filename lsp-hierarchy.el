@@ -707,8 +707,17 @@ An empty successful response is a leaf; an error remains retryable."
 
 (defun lsp-hierarchy--goto-node (node)
   "Move to the start of NODE's visible row."
-  (let ((position (and node (text-property-any (point-min) (point-max)
-                                              'lsp-hierarchy-item node))))
+  (let* ((cached (and node lsp-hierarchy--row-positions
+                      (car (gethash node lsp-hierarchy--row-positions))))
+         ;; Direct insertion can leave an older index in place.  Only use a
+         ;; cached row start while its position and node property still agree.
+         (position (and node
+                        (or (and cached (<= (point-min) cached) (< cached (point-max))
+                                 (eq (get-text-property cached 'lsp-hierarchy-item) node)
+                                 (or (= cached (point-min)) (eq (char-before cached) ?\n))
+                                 cached)
+                            (text-property-any (point-min) (point-max)
+                                               'lsp-hierarchy-item node)))))
     (unless position (user-error "Node is not visible"))
     (goto-char position)))
 
