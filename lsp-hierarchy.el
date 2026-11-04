@@ -43,8 +43,9 @@
   :link '(url-link "https://github.com/condy0919/lsp-hierarchy"))
 
 (defcustom lsp-hierarchy-expand-depth 1
-  "Initial expansion depth."
-  :type 'integer
+  "Initial expansion depth.
+Zero leaves roots closed; one loads their immediate children."
+  :type 'natnum
   :group 'lsp-hierarchy)
 
 (defcustom lsp-hierarchy-detailed-outline t
@@ -336,9 +337,10 @@ LSP kind abbreviations, the symbol label, and any extra details."
        (cfn
         (lsp-hierarchy--load-async item indent h))))))
 
-(defun lsp-hierarchy--load-async (item indent hierarchy)
-  "Fetch and insert children of ITEM at INDENT in HIERARCHY."
-  (let* ((cfn (plist-get item :children-fn))
+(defun lsp-hierarchy--load-async (item indent hierarchy &optional depth)
+  "Load ITEM at INDENT in HIERARCHY, expanding up to DEPTH levels."
+  (let* ((depth (or depth 1))
+         (cfn (plist-get item :children-fn))
          (precomputed (plist-get item :children))
          (source lsp-hierarchy--source-buffer)
          (origin (copy-marker (line-beginning-position) t))
@@ -384,18 +386,32 @@ LSP kind abbreviations, the symbol label, and any extra details."
            (message "LSP hierarchy: %s (TAB to retry)" (lsp-hierarchy--error-message err)))
          (succeed (children)
            (condition-case err
-               (let ((inhibit-read-only t))
+               (let ((inhibit-read-only t)
+                     expand)
                  (save-excursion
                    (remove-loading)
                    (goto-char marker)
                    (dolist (child (append precomputed children))
                      (hierarchy-add-tree hierarchy (plist-get child :id) (lambda (_) (plist-get item :id)))
                      (puthash child 'close lsp-hierarchy--state-table)
-                     (lsp-hierarchy--insert-node child (1+ indent) hierarchy))
+                     (let ((start (point)))
+                       (lsp-hierarchy--insert-node child (1+ indent) hierarchy)
+                       (when (and (> depth 1) (plist-get child :children-fn))
+                         (push (cons child (copy-marker start t)) expand))))
                    (puthash item t lsp-hierarchy--loaded-table)
                    (goto-char origin)
                    (lsp-hierarchy--set-subtree-visibility
                     (if (eq (gethash item lsp-hierarchy--state-table) 'open) 'show 'hide)))
+                 ;; Keep a finite depth budget with this request.  Point may
+                 ;; have moved, and the user may have folded an ancestor.
+                 (unwind-protect
+                     (when (and (eq (gethash item lsp-hierarchy--state-table) 'open)
+                                (not (invisible-p origin)))
+                       (dolist (entry (reverse expand))
+                         (save-excursion
+                           (goto-char (cdr entry))
+                           (lsp-hierarchy--load-async (car entry) (1+ indent) hierarchy (1- depth)))))
+                   (dolist (entry expand) (set-marker (cdr entry) nil)))
                  (finish))
              (error (fail err)))))
       ;; Send-time exceptions and asynchronous failures take the same path;
@@ -518,7 +534,8 @@ TITLE is used as the mode name.
 VIEW-TYPE is either \='call or \='type.
 OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
   (let ((buf (get-buffer-create buffer-name))
-        (h (hierarchy-new)))
+        (h (hierarchy-new))
+        initial-nodes)
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -558,8 +575,17 @@ OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
             (hierarchy-add-tree h (plist-get item :id) nil)
             (puthash item 'close lsp-hierarchy--state-table)
             (puthash item nil lsp-hierarchy--loaded-table)
-            (lsp-hierarchy--insert-node item 0 h))))
-      (goto-char (point-min)))
+            (let ((start (point)))
+              (lsp-hierarchy--insert-node item 0 h)
+              (push (cons item (copy-marker start t)) initial-nodes)))))
+      (goto-char (point-min))
+      (unwind-protect
+          (when (> lsp-hierarchy-expand-depth 0)
+            (dolist (entry (reverse initial-nodes))
+              (save-excursion
+                (goto-char (cdr entry))
+                (lsp-hierarchy--load-async (car entry) 0 h lsp-hierarchy-expand-depth))))
+        (dolist (entry initial-nodes) (set-marker (cdr entry) nil))))
     (pop-to-buffer buf)))
 
 ;;; --- LSP Backends & Views Implementation ---

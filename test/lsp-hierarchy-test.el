@@ -438,5 +438,46 @@
       (when (buffer-live-p target) (kill-buffer target))
       (delete-file file))))
 
+(ert-deftest lsp-hierarchy-initial-expansion-depth ()
+  (dolist (depth '(0 1 2))
+    (lsp-hierarchy-test--with-session
+      (let ((lsp-hierarchy-expand-depth depth))
+        (with-current-buffer (lsp-hierarchy-test--show)
+          (lsp-hierarchy-test--roots "root")
+          (should (= (length lsp-hierarchy-test--sent) (if (= depth 0) 1 2)))
+          (when (> depth 0)
+            (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                       (vector (lsp-hierarchy-test--call "child")))
+            (should (= (length lsp-hierarchy-test--sent) (if (= depth 1) 2 3)))))))))
+
+(ert-deftest lsp-hierarchy-auto-expansion-stops-after-folding ()
+  (lsp-hierarchy-test--with-session
+    (let ((lsp-hierarchy-expand-depth 3))
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--toggle "root")
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                   (vector (lsp-hierarchy-test--call "child")))
+        (should (= 2 (length lsp-hierarchy-test--sent)))
+        (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child"))))))))
+
+(ert-deftest lsp-hierarchy-auto-expands-each-workspaces-roots ()
+  (lsp-hierarchy-test--with-session
+    (let ((lsp-hierarchy-expand-depth 1))
+      (push (lsp-hierarchy-test--workspace
+             'server-b (lsp-make-server-capabilities :call-hierarchy-provider? t))
+            lsp-hierarchy-test--workspaces)
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (dolist (request (copy-sequence lsp-hierarchy-test--sent))
+          (lsp-hierarchy-test--reply request (vector (lsp-hierarchy-test--item "same"))))
+        (should (= 4 (length lsp-hierarchy-test--sent)))
+        (let ((children (seq-filter
+                         (lambda (request)
+                           (equal (plist-get (plist-get request :body) :method) "callHierarchy/incomingCalls"))
+                         lsp-hierarchy-test--sent)))
+          (should (= 2 (length children)))
+          (should-not (eq (plist-get (car children) :workspace)
+                          (plist-get (cadr children) :workspace))))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
