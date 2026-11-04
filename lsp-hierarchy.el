@@ -121,12 +121,21 @@ several paths lead to the same protocol item."
   ;; Expansion is a user choice; loading can finish while a node is folded.
   ;; load-state is one of unloaded/loading/loaded/error.  A loaded empty
   ;; children list is a known leaf; an error remains retryable.
-  expanded (load-state 'unloaded) request error)
+  expanded (load-state 'unloaded) request error
+  ;; A refresh snapshot contains identities and UI choices, never old LSP data.
+  restore)
+
+(cl-defstruct (lsp-hierarchy--saved-node (:constructor lsp-hierarchy--make-saved-node))
+  "Immutable identity and expansion state of one occurrence before refresh."
+  workspace key expanded children)
 
 (cl-defstruct (lsp-hierarchy--view (:constructor lsp-hierarchy--make-view))
   "Resources and query context owned by one hierarchy buffer."
   ;; origin follows source edits and is detached when this view is disposed.
   source origin kind direction roots (status 'ready) error
+  ;; Keep pending focus separate: a user command cancels cursor restoration,
+  ;; while expansion can continue asynchronously until the saved path loads.
+  restore restore-focus
   (generation (make-symbol "lsp-hierarchy-view"))
   (requests (make-hash-table :test 'eq))
   (file-cache (make-hash-table :test 'equal))
@@ -514,7 +523,8 @@ can insert rows anywhere above the user's current position."
       (when (window-live-p (car entry))
         (set-window-start (car entry) (lsp-hierarchy--anchor-position (nth 1 entry)) t)
         (set-window-point (car entry) (lsp-hierarchy--anchor-position (nth 2 entry)))))
-    (set-buffer-modified-p nil)))
+    (set-buffer-modified-p nil)
+    (lsp-hierarchy--restore-focus)))
 
 ;;; Core: Interaction Logic
 
@@ -647,7 +657,10 @@ A loading or failed branch is folded without cancelling or retrying it."
       (let ((expanded (lsp-hierarchy--node-expanded node)))
         (setf (lsp-hierarchy--node-expanded node) (not expanded))
         (condition-case err
-            (lsp-hierarchy--render)
+            (progn
+              (lsp-hierarchy--render)
+              (when (lsp-hierarchy--node-expanded node)
+                (lsp-hierarchy--resume-restore (list node))))
           (error
            (setf (lsp-hierarchy--node-expanded node) expanded)
            (signal (car err) (cdr err)))))))))
@@ -700,6 +713,8 @@ A loading or failed branch is folded without cancelling or retrying it."
                    (lsp-hierarchy--node-load-state node) 'loaded
                    (lsp-hierarchy--node-request node) nil)
              (dolist (child nodes) (setf (lsp-hierarchy--node-parent child) node))
+             (when-let* ((saved (lsp-hierarchy--node-restore node)))
+               (lsp-hierarchy--match-restore nodes (lsp-hierarchy--saved-node-children saved)))
              (condition-case err
                  (progn
                    (lsp-hierarchy--render)
@@ -708,6 +723,8 @@ A loading or failed branch is folded without cancelling or retrying it."
                (error
                 (setf (lsp-hierarchy--node-children node) previous)
                 (fail err)))
+             (when (eq (lsp-hierarchy--node-load-state node) 'loaded)
+               (lsp-hierarchy--resume-restore (list node)))
              ;; A response may arrive under a folded ancestor.  Keep its
              ;; children cached, but do not start more automatic requests.
              (when (and (eq (lsp-hierarchy--node-load-state node) 'loaded)
@@ -838,6 +855,7 @@ Failed requests can be retried by clicking their status row.
   (setq-local revert-buffer-function #'lsp-hierarchy--revert)
 
   (setq-local lsp-hierarchy--view (lsp-hierarchy--make-view))
+  (add-hook 'pre-command-hook #'lsp-hierarchy--cancel-restore-focus nil t)
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t))
 
@@ -856,11 +874,15 @@ Failed requests can be retried by clicking their status row.
                        roots)))
     (setf (lsp-hierarchy--view-roots lsp-hierarchy--view) nodes
           (lsp-hierarchy--view-status lsp-hierarchy--view) 'ready)
+    (when-let* ((state (lsp-hierarchy--view-restore lsp-hierarchy--view)))
+      (lsp-hierarchy--match-restore nodes (plist-get state :roots)))
     (lsp-hierarchy--render)
     (dolist (node nodes)
       (lsp-hierarchy--register-node node))
-    (when (> lsp-hierarchy-expand-depth 0)
-      (lsp-hierarchy--expand-nodes nodes lsp-hierarchy-expand-depth))))
+    (if (lsp-hierarchy--view-restore lsp-hierarchy--view)
+        (lsp-hierarchy--resume-restore nodes)
+      (when (> lsp-hierarchy-expand-depth 0)
+        (lsp-hierarchy--expand-nodes nodes lsp-hierarchy-expand-depth)))))
 
 ;;; --- LSP Backends & Views Implementation ---
 
@@ -1020,8 +1042,9 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
         (lsp-hierarchy--view-error lsp-hierarchy--view) err)
   (lsp-hierarchy--render))
 
-(defun lsp-hierarchy--prepare (view-type direction &optional target)
-  "Prepare VIEW-TYPE in DIRECTION, replacing TARGET or the default view."
+(defun lsp-hierarchy--prepare (view-type direction &optional target restore)
+  "Prepare VIEW-TYPE in DIRECTION, replacing TARGET or the default view.
+RESTORE is an optional snapshot of expansion and point before refresh."
   (let* ((source (current-buffer))
          (method (if (eq view-type 'call)
                      "textDocument/prepareCallHierarchy" "textDocument/prepareTypeHierarchy"))
@@ -1046,7 +1069,9 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
             (lsp-hierarchy--view-origin lsp-hierarchy--view) origin
             (lsp-hierarchy--view-kind lsp-hierarchy--view) view-type
             (lsp-hierarchy--view-direction lsp-hierarchy--view) direction
-            (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading)
+            (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading
+            (lsp-hierarchy--view-restore lsp-hierarchy--view) restore
+            (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) (plist-get restore :focus))
       (setq mode-name (if (eq view-type 'call)
                           (if direction "Outgoing Calls" "Incoming Calls")
                         (if (eq direction 'supertypes) "Supertypes" "Subtypes")))
@@ -1067,17 +1092,122 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
        nil workspaces t))
     (pop-to-buffer view)))
 
-(defun lsp-hierarchy-refresh ()
+;;; Refresh State
+
+(defun lsp-hierarchy--refresh-key (node)
+  "Return NODE's scalar identity, independent of protocol representation."
+  (let* ((range (lsp-hierarchy--node-range node))
+         (start (and range (lsp-get range :start)))
+         (end (and range (lsp-get range :end))))
+    (list (lsp-hierarchy--node-type node) (lsp-hierarchy--node-uri node)
+          (lsp-hierarchy--node-name node) (lsp-hierarchy--node-kind node)
+          (and start (lsp-get start :line)) (and start (lsp-get start :character))
+          (and end (lsp-get end :line)) (and end (lsp-get end :character)))))
+
+(defun lsp-hierarchy--save-refresh-state ()
+  "Snapshot expansion and point without retaining old nodes or server data."
+  (let ((anchor (lsp-hierarchy--anchor (point))) focus)
+    (cl-labels
+        ((save-node (node path)
+           (let* ((saved (lsp-hierarchy--make-saved-node
+                          :workspace (lsp-hierarchy--node-workspace node)
+                          :key (lsp-hierarchy--refresh-key node)
+                          :expanded (lsp-hierarchy--node-expanded node)))
+                  (path (append path (list saved))))
+             (when (eq node (car anchor))
+               (setq focus (list path (cadr anchor) (nth 2 anchor))))
+             (setf (lsp-hierarchy--saved-node-children saved)
+                   (mapcar (lambda (child) (save-node child path))
+                           (lsp-hierarchy--node-children node)))
+             saved)))
+      (let ((roots (mapcar (lambda (node) (save-node node nil))
+                          (lsp-hierarchy--view-roots lsp-hierarchy--view))))
+        (list :roots roots :focus focus)))))
+
+(defun lsp-hierarchy--match-restore (nodes snapshots)
+  "Match fresh NODES to sibling SNAPSHOTS, preserving each occurrence.
+Workspaces compare by identity; equal siblings consume snapshots in order.
+Matching stays within one parent so shared symbols keep independent state."
+  (let ((remaining (copy-sequence snapshots)))
+    (dolist (node nodes)
+      (when-let* ((saved
+                  (seq-find
+                   (lambda (candidate)
+                     (and (eq (lsp-hierarchy--node-workspace node)
+                              (lsp-hierarchy--saved-node-workspace candidate))
+                          (equal (lsp-hierarchy--refresh-key node)
+                                 (lsp-hierarchy--saved-node-key candidate))))
+                   remaining)))
+        (setq remaining (delq saved remaining))
+        ;; Known call-site children can already have been matched before the
+        ;; relationship request.  Never overwrite a subsequent user choice.
+        (unless (lsp-hierarchy--node-restore node)
+          (setf (lsp-hierarchy--node-restore node) saved
+                (lsp-hierarchy--node-expanded node) (lsp-hierarchy--saved-node-expanded saved))
+          (lsp-hierarchy--match-restore (lsp-hierarchy--node-children node)
+                                        (lsp-hierarchy--saved-node-children saved)))))))
+
+(defun lsp-hierarchy--resume-restore (nodes)
+  "Continue saved expansions below visible, open NODES.
+A folded ancestor suspends descent.  Failed requests need an explicit retry;
+only unloaded nodes may start automatically, using their new protocol items."
+  (let (started)
+    (let ((lsp-hierarchy--batch-loading t))
+      (dolist (node nodes)
+        (when (and (lsp-hierarchy--node-restore node)
+                   (lsp-hierarchy--node-expanded node)
+                   (lsp-hierarchy--visible-p node))
+          (if (eq (lsp-hierarchy--node-load-state node) 'unloaded)
+              (progn
+                (setq started t)
+                (lsp-hierarchy--load-async node))
+            (when (lsp-hierarchy--resume-restore (lsp-hierarchy--node-children node))
+              (setq started t))))))
+    (when (and started (not lsp-hierarchy--batch-loading))
+      (lsp-hierarchy--render-expansion))
+    started))
+
+(defun lsp-hierarchy--cancel-restore-focus ()
+  "Let the next user command own point, even while refresh is still loading."
+  (when (lsp-hierarchy--view-p lsp-hierarchy--view)
+    (setf (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) nil)))
+
+(defun lsp-hierarchy--restore-focus ()
+  "Restore the deepest visible match for the pending saved point.
+Keep waiting only when an open ancestor is still loading the missing path."
+  (when-let* ((focus (lsp-hierarchy--view-restore-focus lsp-hierarchy--view)))
+    (let ((path (car focus))
+          (nodes (lsp-hierarchy--view-roots lsp-hierarchy--view))
+          node next)
+      (while (and path
+                  (setq next (seq-find (lambda (candidate)
+                                         (eq (car path) (lsp-hierarchy--node-restore candidate)))
+                                       nodes)))
+        (setq node next path (cdr path)
+              nodes (and (lsp-hierarchy--node-expanded node)
+                         (lsp-hierarchy--node-children node))))
+      (when node
+        (goto-char (lsp-hierarchy--anchor-position
+                    (list node (cadr focus) (and (null path) (nth 2 focus))))))
+      (unless (or (eq (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading)
+                  (and path node (lsp-hierarchy--node-expanded node)
+                       (memq (lsp-hierarchy--node-load-state node) '(unloaded loading))))
+        (lsp-hierarchy--cancel-restore-focus)))))
+
+(defun lsp-hierarchy-refresh (&optional reset)
   "Refresh this view at its original source position.
 The source marker follows edits, but moving point in the source buffer does
-not change the query.  Refresh discards cached nodes and pending requests."
-  (interactive)
+not change the query.  Expansion and point are restored where paths still
+match; nodes and server data are always fetched afresh.  With prefix RESET,
+start over using `lsp-hierarchy-expand-depth' instead of preserving state."
+  (interactive "P")
   (unless (and (derived-mode-p 'lsp-hierarchy-mode) lsp-hierarchy--view)
     (user-error "Not in a hierarchy view"))
   (let ((target (current-buffer))
         (kind (lsp-hierarchy--view-kind lsp-hierarchy--view))
         (direction (lsp-hierarchy--view-direction lsp-hierarchy--view))
-        (origin (lsp-hierarchy--view-origin lsp-hierarchy--view)))
+        (origin (lsp-hierarchy--view-origin lsp-hierarchy--view))
+        (restore (unless reset (lsp-hierarchy--save-refresh-state))))
     (unless (and (markerp origin) (marker-buffer origin))
       (user-error "The hierarchy source buffer has been killed"))
     (with-current-buffer (marker-buffer origin)
@@ -1085,7 +1215,7 @@ not change the query.  Refresh discards cached nodes and pending requests."
         (widen)
         (save-excursion
           (goto-char origin)
-          (lsp-hierarchy--prepare kind direction target))))))
+          (lsp-hierarchy--prepare kind direction target restore))))))
 
 (defun lsp-hierarchy--revert (_ignore-auto _noconfirm)
   "Refresh the current hierarchy through `revert-buffer'."
