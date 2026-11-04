@@ -311,67 +311,66 @@
 (ert-deftest lsp-hierarchy-folding-hides-whole-lines-without-ellipsis ()
   "Repeated folds must not prefix the next visible row with an ellipsis."
   (lsp-hierarchy-test--with-session
-    (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root" "next-root")
-      (lsp-hierarchy-test--toggle "root")
-      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
-                               (vector (lsp-hierarchy-test--call "alpha")
-                                       (lsp-hierarchy-test--call "beta")))
-      (lsp-hierarchy-test--toggle "alpha")
-      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
-                               (vector (lsp-hierarchy-test--call "grandchild")))
-      (lsp-hierarchy-test--toggle "alpha")
-      (dotimes (_ 3)
-        (lsp-hierarchy-test--toggle "root")
-        (dolist (name '("alpha" "grandchild" "beta"))
-          ;; `invisible-p' returns t for fully hidden text, but a different
-          ;; non-nil value when display replaces it with an ellipsis.
-          (should (eq t (invisible-p (lsp-hierarchy-test--node-position
-                                     (lsp-hierarchy-test--node name))))))
-        (should-not (invisible-p (lsp-hierarchy-test--node-position
-                                  (lsp-hierarchy-test--node "next-root"))))
-        (lsp-hierarchy-test--toggle "root")
-        (dolist (name '("alpha" "beta"))
-          (should-not (invisible-p (lsp-hierarchy-test--node-position
-                                    (lsp-hierarchy-test--node name)))))
-        (should (eq t (invisible-p (lsp-hierarchy-test--node-position
-                                   (lsp-hierarchy-test--node "grandchild"))))))
-      (lsp-hierarchy-test--toggle "alpha")
-      (should-not (invisible-p (lsp-hierarchy-test--node-position
-                                (lsp-hierarchy-test--node "grandchild")))))))
+   (with-current-buffer (lsp-hierarchy-test--show)
+     (lsp-hierarchy-test--roots "root" "next-root")
+     (lsp-hierarchy-test--toggle "root")
+     (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+				(vector (lsp-hierarchy-test--call "alpha")
+					(lsp-hierarchy-test--call "beta")))
+     (lsp-hierarchy-test--toggle "alpha")
+     (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+				(vector (lsp-hierarchy-test--call "grandchild")))
+     (lsp-hierarchy-test--toggle "alpha")
+     (dotimes (_ 3)
+       (lsp-hierarchy-test--toggle "root")
+       (dolist (name '("alpha" "grandchild" "beta"))
+         ;; Folded nodes remain in the model but contribute no display row.
+         (should-not (lsp-hierarchy-test--node-position
+                      (lsp-hierarchy-test--node name))))
+       (should (lsp-hierarchy-test--node-position
+                (lsp-hierarchy-test--node "next-root")))
+       (lsp-hierarchy-test--toggle "root")
+       (dolist (name '("alpha" "beta"))
+         (should (lsp-hierarchy-test--node-position
+                  (lsp-hierarchy-test--node name))))
+       (should-not (lsp-hierarchy-test--node-position
+                    (lsp-hierarchy-test--node "grandchild"))))
+     (lsp-hierarchy-test--toggle "alpha")
+     (should (lsp-hierarchy-test--node-position
+              (lsp-hierarchy-test--node "grandchild"))))))
 
 (ert-deftest lsp-hierarchy-folding-survives-pending-descendants ()
   (lsp-hierarchy-test--with-session
-    (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root")
-      (lsp-hierarchy-test--toggle "root")
-      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
-                                 (vector (lsp-hierarchy-test--call "alpha")
-                                         (lsp-hierarchy-test--call "beta")))
-      (lsp-hierarchy-test--toggle "alpha")
-      (let ((pending (car lsp-hierarchy-test--sent)))
-        (lsp-hierarchy-test--toggle "root")
-        (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "beta"))))
-        (lsp-hierarchy-test--reply pending (vector (lsp-hierarchy-test--call "grandchild")))
-        (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild"))))
-        (lsp-hierarchy-test--toggle "root")
-        (should-not (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild"))))
-        (lsp-hierarchy-test--toggle "alpha")
-        (lsp-hierarchy-test--toggle "root")
-        (lsp-hierarchy-test--toggle "root")
-        (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild"))))))))
+   (with-current-buffer (lsp-hierarchy-test--show)
+     (lsp-hierarchy-test--roots "root")
+     (lsp-hierarchy-test--toggle "root")
+     (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                (vector (lsp-hierarchy-test--call "alpha")
+                                        (lsp-hierarchy-test--call "beta")))
+     (lsp-hierarchy-test--toggle "alpha")
+     (let ((pending (car lsp-hierarchy-test--sent)))
+       (lsp-hierarchy-test--toggle "root")
+       (should-not (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "beta")))
+       (lsp-hierarchy-test--reply pending (vector (lsp-hierarchy-test--call "grandchild")))
+       (should-not (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild")))
+       (lsp-hierarchy-test--toggle "root")
+       (should (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild")))
+       (lsp-hierarchy-test--toggle "alpha")
+       (lsp-hierarchy-test--toggle "root")
+       (lsp-hierarchy-test--toggle "root")
+       (should-not (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "grandchild")))))))
 
 (ert-deftest lsp-hierarchy-can-fold-while-node-is-loading ()
   (lsp-hierarchy-test--with-session
-    (with-current-buffer (lsp-hierarchy-test--show)
-      (lsp-hierarchy-test--roots "root")
-      (lsp-hierarchy-test--toggle "root")
-      (lsp-hierarchy-test--toggle "root")
-      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
-                                 (vector (lsp-hierarchy-test--call "child")))
-      (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child"))))
-      (lsp-hierarchy-test--toggle "root")
-      (should-not (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child")))))))
+   (with-current-buffer (lsp-hierarchy-test--show)
+     (lsp-hierarchy-test--roots "root")
+     (lsp-hierarchy-test--toggle "root")
+     (lsp-hierarchy-test--toggle "root")
+     (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                (vector (lsp-hierarchy-test--call "child")))
+     (should-not (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child")))
+     (lsp-hierarchy-test--toggle "root")
+     (should (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child"))))))
 
 (ert-deftest lsp-hierarchy-symbol-jumps-use-selection-range ()
   (dolist (kind '(call type))
@@ -479,14 +478,14 @@
 
 (ert-deftest lsp-hierarchy-auto-expansion-stops-after-folding ()
   (lsp-hierarchy-test--with-session
-    (let ((lsp-hierarchy-expand-depth 3))
-      (with-current-buffer (lsp-hierarchy-test--show)
-        (lsp-hierarchy-test--roots "root")
-        (lsp-hierarchy-test--toggle "root")
-        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
-                                   (vector (lsp-hierarchy-test--call "child")))
-        (should (= 2 (length lsp-hierarchy-test--sent)))
-        (should (invisible-p (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child"))))))))
+   (let ((lsp-hierarchy-expand-depth 3))
+     (with-current-buffer (lsp-hierarchy-test--show)
+       (lsp-hierarchy-test--roots "root")
+       (lsp-hierarchy-test--toggle "root")
+       (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                  (vector (lsp-hierarchy-test--call "child")))
+       (should (= 2 (length lsp-hierarchy-test--sent)))
+       (should-not (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child")))))))
 
 (ert-deftest lsp-hierarchy-auto-expands-each-workspaces-roots ()
   (lsp-hierarchy-test--with-session
@@ -653,6 +652,40 @@
         (should (= 2 (length (lsp-hierarchy--node-children (lsp-hierarchy-test--node "root")))))
         (should (= 1 (how-many "alpha" (point-min) (point-max))))))))
 
+(ert-deftest lsp-hierarchy-model-can-rebuild-visible-rows ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (vector (lsp-hierarchy-test--call "child")))
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (let ((inhibit-read-only t)) (erase-buffer))
+        (lsp-hierarchy--render)
+        (should (equal text (buffer-substring-no-properties (point-min) (point-max)))))
+      (lsp-hierarchy-test--toggle "root")
+      (should-not (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "child")))
+      (should-not (overlays-in (point-min) (point-max)))
+      (should-not (bound-and-true-p outline-minor-mode)))))
+
+(ert-deftest lsp-hierarchy-redraw-preserves-point-and-window-anchor ()
+  (lsp-hierarchy-test--with-session
+    (save-window-excursion
+      (let ((view (lsp-hierarchy-test--show)))
+        (set-window-buffer (selected-window) view)
+        (with-current-buffer view
+          (lsp-hierarchy-test--roots "root" "second" "third")
+          (lsp-hierarchy-test--toggle "root")
+          (let ((node (lsp-hierarchy-test--node "third")))
+            (goto-char (lsp-hierarchy-test--node-position node))
+            (set-window-start (selected-window) (point) t)
+            (forward-char 4)
+            (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                       (vector (lsp-hierarchy-test--call "child")))
+            (should (eq (lsp-hierarchy--get-prop 'lsp-hierarchy-item) node))
+            (should (= 4 (current-column)))
+            (should (eq (get-text-property (window-start) 'lsp-hierarchy-item) node))))))))
+
 (ert-deftest lsp-hierarchy-late-response-after-major-mode-change-is-ignored ()
   (lsp-hierarchy-test--with-session
     (let* ((view (lsp-hierarchy-test--show))
@@ -666,6 +699,34 @@
       (with-current-buffer view
         (should (eq major-mode 'fundamental-mode))
         (should (equal (buffer-string) "Another view"))))))
+
+(ert-deftest lsp-hierarchy-eob-anchor-stays-at-eob ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "alpha" "beta")
+      (lsp-hierarchy-test--toggle "alpha")
+      (goto-char (point-max))
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) (vector (lsp-hierarchy-test--call "child")))
+      (should (eobp)))))
+(ert-deftest lsp-hierarchy-loading-row-anchor-stays-on-loading-row ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "alpha" "beta")
+      (lsp-hierarchy-test--toggle "alpha")
+      (let ((alpha-request (car lsp-hierarchy-test--sent)))
+        (lsp-hierarchy-test--toggle "beta")
+        (forward-line 1)
+        (should (get-text-property (point) 'lsp-hierarchy-loading))
+        (lsp-hierarchy-test--reply alpha-request (vector (lsp-hierarchy-test--call "child")))
+        (should (get-text-property (point) 'lsp-hierarchy-loading))))))
+(ert-deftest lsp-hierarchy-render-honors-buffer-local-customization ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (setq-local lsp-hierarchy-icon-close "+")
+      (lsp-hierarchy-test--roots "root")
+      (goto-char (point-min))
+      (should (equal (get-text-property (point) 'display) "+")))))
+
 
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

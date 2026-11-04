@@ -30,7 +30,6 @@
 
 (require 'lsp-mode)
 (require 'cl-lib)
-(require 'outline)
 (require 'seq)
 (require 'xref)
 
@@ -102,7 +101,7 @@ several paths lead to the same protocol item."
 
 (cl-defstruct (lsp-hierarchy--view (:constructor lsp-hierarchy--make-view))
   "Resources and query context owned by one hierarchy buffer."
-  source kind direction roots
+  source kind direction roots (status 'ready) error
   (generation (make-symbol "lsp-hierarchy-view"))
   (requests (make-hash-table :test 'eq))
   (file-cache (make-hash-table :test 'equal))
@@ -242,10 +241,10 @@ NO-MERGE preserves workspace ownership of responses."
                              'face 'lsp-hierarchy-detail-face)))
        (when-let* ((annotation (lsp-hierarchy--node-annotation item)))
          (insert (propertize annotation 'face 'lsp-hierarchy-detail-face)))))
+    (insert "\n")
     (add-text-properties beg (point)
                          (list 'lsp-hierarchy-item item
-                               'lsp-hierarchy-indent indent))
-    (insert "\n")))
+                               'lsp-hierarchy-indent indent))))
 
 (defun lsp-hierarchy--get-prop (prop)
   "Get text property PROP on the current line."
@@ -261,29 +260,90 @@ NO-MERGE preserves workspace ownership of responses."
         (setq val (get-text-property pos prop)))
       val)))
 
-;;; Core: Interaction Logic
+(defun lsp-hierarchy--visible-p (node)
+  "Return non-nil if all of NODE's ancestors are expanded."
+  (let ((parent (lsp-hierarchy--node-parent node)))
+    (or (null parent)
+        (and (lsp-hierarchy--node-expanded parent)
+             (eq (lsp-hierarchy--node-load-state parent) 'loaded)
+             (lsp-hierarchy--visible-p parent)))))
 
-(defun lsp-hierarchy--set-subtree-visibility (flag)
-  "Apply FLAG (hide or show) while preserving descendant expansion states."
-  (let ((inhibit-read-only t)
-        (indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent)))
-    (when indent
+(defun lsp-hierarchy--insert-subtree (node indent)
+  "Render NODE and its visible descendants at INDENT."
+  (lsp-hierarchy--insert-node node indent)
+  (when (lsp-hierarchy--node-expanded node)
+    (pcase (lsp-hierarchy--node-load-state node)
+      ('loading
+       (insert (propertize (concat (make-string (* (1+ indent) 2) ?\s) "  Loading...\n")
+                           'lsp-hierarchy-loading t 'lsp-hierarchy-status-node node)))
+      ('loaded
+       (dolist (child (lsp-hierarchy--node-children node))
+         (lsp-hierarchy--insert-subtree child (1+ indent)))))))
+
+(defun lsp-hierarchy--anchor (position)
+  "Describe POSITION by node, column and row kind rather than text offsets."
+  (save-excursion
+    (goto-char position)
+    (if (and (eobp) (> (point-max) (point-min)))
+        (list :end)
+      (let ((status (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node)))
+        (list (or (lsp-hierarchy--get-prop 'lsp-hierarchy-item) status)
+              (current-column) (and status t))))))
+
+(defun lsp-hierarchy--anchor-position (anchor)
+  "Resolve ANCHOR, falling back to its nearest visible ancestor."
+  (if (eq (car anchor) :end)
+      (point-max)
+    (let* ((node (car anchor))
+           (position (and node (nth 2 anchor)
+                          (text-property-any (point-min) (point-max)
+                                             'lsp-hierarchy-status-node node))))
+      (while (and node (not position))
+        (setq position (text-property-any (point-min) (point-max) 'lsp-hierarchy-item node)
+              node (lsp-hierarchy--node-parent node)))
       (save-excursion
-        ;; A response may arrive after an ancestor was folded.  New rows
-        ;; inherit that hidden state even if this node is still expanded.
-        (let ((hidden-depth (when (or (eq flag 'hide) (invisible-p (point))) indent)))
-          (forward-line 1)
-          (while (and (not (eobp))
-                      (> (or (lsp-hierarchy--get-prop 'lsp-hierarchy-indent) -1) indent))
-            (let ((depth (lsp-hierarchy--get-prop 'lsp-hierarchy-indent))
-                  (child (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
-              (when (and hidden-depth (<= depth hidden-depth)) (setq hidden-depth nil))
-              (outline-flag-region (line-beginning-position) (line-beginning-position 2)
-                                   (and hidden-depth t))
-              (when (and (not hidden-depth) child
-                         (not (lsp-hierarchy--node-expanded child)))
-                (setq hidden-depth depth)))
-            (forward-line 1)))))))
+        (goto-char (or position (point-min)))
+        (move-to-column (or (cadr anchor) 0))
+        (point)))))
+
+(defun lsp-hierarchy--render ()
+  "Rebuild visible rows from the model without publishing a partial display.
+Preserve point and each displaying window by node identity, since responses
+can insert rows anywhere above the user's current position."
+  (let* ((view lsp-hierarchy--view)
+         (close-icon lsp-hierarchy-icon-close)
+         (open-icon lsp-hierarchy-icon-open)
+         (detailed lsp-hierarchy-detailed-outline)
+         (anchor (lsp-hierarchy--anchor (point)))
+         (windows (mapcar (lambda (window)
+                            (list window
+                                  (lsp-hierarchy--anchor (window-start window))
+                                  (lsp-hierarchy--anchor (window-point window))))
+                          (get-buffer-window-list (current-buffer) nil t)))
+         (text (with-temp-buffer
+                 (setq-local lsp-hierarchy--view view
+                             lsp-hierarchy-icon-close close-icon
+                             lsp-hierarchy-icon-open open-icon
+                             lsp-hierarchy-detailed-outline detailed)
+                 (pcase (lsp-hierarchy--view-status view)
+                   ('loading (insert "Loading hierarchy...\n"))
+                   ('error (insert "Unable to load hierarchy: "
+                                   (lsp-hierarchy--error-message (lsp-hierarchy--view-error view)) "\n"))
+                   (_ (dolist (node (lsp-hierarchy--view-roots view))
+                        (lsp-hierarchy--insert-subtree node 0))))
+                 (buffer-string))))
+    (let ((inhibit-read-only t))
+      (atomic-change-group
+        (erase-buffer)
+        (insert text)))
+    (goto-char (lsp-hierarchy--anchor-position anchor))
+    (dolist (entry windows)
+      (when (window-live-p (car entry))
+        (set-window-start (car entry) (lsp-hierarchy--anchor-position (nth 1 entry)) t)
+        (set-window-point (car entry) (lsp-hierarchy--anchor-position (nth 2 entry)))))
+    (set-buffer-modified-p nil)))
+
+;;; Core: Interaction Logic
 
 (defun lsp-hierarchy--expandable-p (node)
   "Return non-nil if NODE has children or has not yet resolved them.
@@ -294,121 +354,71 @@ An empty successful response is a leaf; an error remains retryable."
            (lsp-hierarchy--node-children node))))
 
 (defun lsp-hierarchy-toggle ()
-  "Toggle node at point, loading children if necessary."
+  "Toggle the node at point, loading its children when necessary."
   (interactive)
-  (let* ((item (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
-         (indent (lsp-hierarchy--get-prop 'lsp-hierarchy-indent)))
-    (unless item
-      (user-error "No node here"))
-    (if (not (lsp-hierarchy--expandable-p item))
-        (forward-line 1)
-      (cond
-       ((or (eq (lsp-hierarchy--node-load-state item) 'loaded)
-            (eq (lsp-hierarchy--node-load-state item) 'loading))
-        (let ((current-state (lsp-hierarchy--node-expanded item)))
-          (if current-state
-              (progn
-                (lsp-hierarchy--set-subtree-visibility 'hide)
-                (setf (lsp-hierarchy--node-expanded item) nil))
-            (progn
-              (lsp-hierarchy--set-subtree-visibility 'show)
-              (setf (lsp-hierarchy--node-expanded item) t)))
-          (lsp-hierarchy--update-icon)))
+  (let ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
+    (unless node (user-error "No node here"))
+    (cond
+     ((not (lsp-hierarchy--expandable-p node)) (forward-line 1))
+     ((memq (lsp-hierarchy--node-load-state node) '(unloaded error))
+      (lsp-hierarchy--load-async node))
+     (t
+      (let ((expanded (lsp-hierarchy--node-expanded node)))
+        (setf (lsp-hierarchy--node-expanded node) (not expanded))
+        (condition-case err
+            (lsp-hierarchy--render)
+          (error
+           (setf (lsp-hierarchy--node-expanded node) expanded)
+           (signal (car err) (cdr err)))))))))
 
-       ((eq (lsp-hierarchy--node-type item) 'symbol)
-        (lsp-hierarchy--load-async item indent))))))
-
-(defun lsp-hierarchy--load-async (item indent &optional depth)
-  "Load ITEM at INDENT, expanding up to DEPTH levels."
-  (let* ((depth (or depth 1))
-         (precomputed (lsp-hierarchy--node-call-sites item))
-         (source (lsp-hierarchy--view-source lsp-hierarchy--view))
-         (origin (copy-marker (line-beginning-position) t))
-         (marker (copy-marker (line-beginning-position 2)))
-         (token (make-symbol "lsp-hierarchy-node-request"))
-         placeholder)
-    (setf (lsp-hierarchy--node-request item) token
-          (lsp-hierarchy--node-load-state item) 'loading
-          (lsp-hierarchy--node-error item) nil)
-    (setf (lsp-hierarchy--node-expanded item) t)
-    (lsp-hierarchy--update-icon)
-    (let ((inhibit-read-only t))
-      (save-excursion
-        (goto-char marker)
-        (let ((beg (point)))
-          (insert (make-string (* (1+ indent) 2) ?\s) "  Loading...\n")
-          ;; Status rows take part in folding but are not symbol nodes.
-          (add-text-properties beg (point)
-                               (list 'lsp-hierarchy-loading t
-                                     'lsp-hierarchy-indent (1+ indent)
-                                     'lsp-hierarchy-item nil))
-          ;; Responses can finish out of order.  Each request owns its row;
-          ;; searching the buffer for the first loading marker is ambiguous.
-          (setq placeholder (make-overlay beg (point)))
-          (overlay-put placeholder 'evaporate t))))
+(defun lsp-hierarchy--load-async (node &optional depth)
+  "Load NODE's children, automatically expanding at most DEPTH levels."
+  (let ((depth (or depth 1))
+        (token (make-symbol "lsp-hierarchy-node-request")))
+    (setf (lsp-hierarchy--node-request node) token
+          (lsp-hierarchy--node-load-state node) 'loading
+          (lsp-hierarchy--node-error node) nil
+          (lsp-hierarchy--node-expanded node) t)
     (cl-labels
-        ((remove-loading ()
-           (when-let* ((pos (overlay-start placeholder)))
-             (goto-char pos)
-             (delete-region pos (overlay-end placeholder))
-             (delete-overlay placeholder)))
-         (finish ()
-           (setf (lsp-hierarchy--node-request item) nil)
-           (set-marker marker nil)
-           (set-marker origin nil))
-         (fail (err)
-           (let ((inhibit-read-only t))
-             (save-excursion
-               (remove-loading)
-               (setf (lsp-hierarchy--node-expanded item) nil)
-               (setf (lsp-hierarchy--node-load-state item) 'error
-                     (lsp-hierarchy--node-error item) err)
-               (goto-char origin)
-               (lsp-hierarchy--update-icon)))
-           (finish)
+        ((fail (err)
+           (setf (lsp-hierarchy--node-request node) nil
+                 (lsp-hierarchy--node-load-state node) 'error
+                 (lsp-hierarchy--node-error node) err
+                 (lsp-hierarchy--node-expanded node) nil)
+           (lsp-hierarchy--render)
            (message "LSP hierarchy: %s (TAB to retry)" (lsp-hierarchy--error-message err)))
          (succeed (children)
-           (condition-case err
-               (let* ((inhibit-read-only t)
-                      (nodes (append precomputed children))
-                      (view lsp-hierarchy--view)
-                      ;; Finish rendering before publishing any child.  An
-                      ;; invalid row must not leave half a response to retry.
-                      (text (with-temp-buffer
-                              (setq-local lsp-hierarchy--view view)
-                              (dolist (child nodes)
-                                (lsp-hierarchy--insert-node child (1+ indent)))
-                              (buffer-string))))
-                 (save-excursion
-                   (remove-loading)
-                   (goto-char marker)
-                   (atomic-change-group (insert text))
+           (let ((previous (lsp-hierarchy--node-children node))
+                 (nodes (append (lsp-hierarchy--node-call-sites node) children)))
+             ;; The renderer builds the entire candidate display off-screen.
+             ;; Publish the registry only once it succeeds; rollback the
+             ;; candidate children on failure so retry cannot duplicate rows.
+             (setf (lsp-hierarchy--node-children node) nodes
+                   (lsp-hierarchy--node-load-state node) 'loaded
+                   (lsp-hierarchy--node-request node) nil)
+             (dolist (child nodes) (setf (lsp-hierarchy--node-parent child) node))
+             (condition-case err
+                 (progn
+                   (lsp-hierarchy--render)
                    (dolist (child nodes)
-                     (setf (lsp-hierarchy--node-parent child) item)
                      (puthash (lsp-hierarchy--node-id child) child
-                              (lsp-hierarchy--view-nodes view)))
-                   (setf (lsp-hierarchy--node-load-state item) 'loaded
-                         (lsp-hierarchy--node-children item) nodes)
-                   (goto-char origin)
-                   (lsp-hierarchy--set-subtree-visibility
-                    (if (lsp-hierarchy--node-expanded item) 'show 'hide))
-                   (lsp-hierarchy--update-icon))
-                 ;; Expansion uses node identity after insertion, not markers
-                 ;; allocated while an incomplete response is being rendered.
-                 (when (and (> depth 1) (lsp-hierarchy--node-expanded item)
-                            (not (invisible-p origin)))
-                   (dolist (child nodes)
-                     (when (eq (lsp-hierarchy--node-type child) 'symbol)
-                       (save-excursion
-                         (goto-char (text-property-any (point-min) (point-max)
-                                                       'lsp-hierarchy-item child))
-                         (lsp-hierarchy--load-async child (1+ indent) (1- depth))))))
-                 (finish))
-             (error (fail err)))))
-      ;; Send-time exceptions and asynchronous failures take the same path;
-      ;; neither is a successful empty result and both must allow retrying.
+                              (lsp-hierarchy--view-nodes lsp-hierarchy--view))))
+               (error
+                (setf (lsp-hierarchy--node-children node) previous)
+                (fail err)))
+             ;; A response may arrive under a folded ancestor.  Keep its
+             ;; children cached, but do not start more automatic requests.
+             (when (and (eq (lsp-hierarchy--node-load-state node) 'loaded)
+                        (> depth 1) (lsp-hierarchy--node-expanded node)
+                        (lsp-hierarchy--visible-p node))
+               (dolist (child nodes)
+                 (when (eq (lsp-hierarchy--node-type child) 'symbol)
+                   (lsp-hierarchy--load-async child (1- depth))))))))
       (condition-case err
-          (lsp-hierarchy--fetch-children item source #'succeed #'fail token)
+          (progn
+            (lsp-hierarchy--render)
+            (lsp-hierarchy--fetch-children
+             node (lsp-hierarchy--view-source lsp-hierarchy--view) #'succeed #'fail token))
         (error (fail err))))))
 
 (defun lsp-hierarchy-goto ()
@@ -422,17 +432,17 @@ An empty successful response is a leaf; an error remains retryable."
                               (lsp-hierarchy--node-workspace node))))
 
 (defun lsp-hierarchy-smart-tab ()
-  "Toggle the node at point, or move to the next symbol."
+  "Toggle the node at point, or move to the next visible symbol."
   (interactive)
   (if (lsp-hierarchy--expandable-p (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
       (lsp-hierarchy-toggle)
-    (outline-next-heading)))
+    (forward-line 1)
+    (while (and (not (eobp))
+                (let ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
+                  (not (and node (eq (lsp-hierarchy--node-type node) 'symbol)))))
+      (forward-line 1))))
 
 ;;; Expansion Indicators
-
-(defvar lsp-hierarchy--outline-regexp
-  (rx line-start (* space) "@")
-  "Regular expression to match the start of a hierarchy node line.")
 
 (defun lsp-hierarchy--icon-properties (item)
   "Return display properties for ITEM's expander."
@@ -443,16 +453,6 @@ An empty successful response is a leaf; an error remains retryable."
                        lsp-hierarchy-icon-close)
                    " ")
         'mouse-face 'highlight))
-
-(defun lsp-hierarchy--update-icon ()
-  "Update the expander on the current row after a state transition."
-  (let ((inhibit-read-only t)
-        (pos (text-property-any (line-beginning-position) (line-end-position)
-                                'lsp-hierarchy-icon-marker t)))
-    (when pos
-      (add-text-properties pos (1+ pos)
-                           (lsp-hierarchy--icon-properties
-                            (get-text-property pos 'lsp-hierarchy-item))))))
 
 ;;; Major Mode Definition
 
@@ -473,17 +473,6 @@ An empty successful response is a leaf; an error remains retryable."
   :interactive nil
   :group 'lsp-hierarchy
 
-  (setq-local outline-minor-mode-cycle nil)
-  (setq-local outline-minor-mode-highlight nil)
-  (setq-local outline-minor-mode-use-buttons nil)
-  (setq-local outline-regexp lsp-hierarchy--outline-regexp)
-  (setq-local outline-level (lambda () (1+ (/ (current-indentation) 2))))
-  (outline-minor-mode 1)
-  ;; Nodes already show their fold state with an arrow.  We hide whole lines,
-  ;; so outline's ellipsis would appear before the next visible node.
-  (remove-from-invisibility-spec '(outline . t))
-  (add-to-invisibility-spec 'outline)
-
   (setq-local buffer-undo-list t)
   (setq-local buffer-read-only t)
   (setq-local indent-tabs-mode nil)
@@ -493,43 +482,20 @@ An empty successful response is a leaf; an error remains retryable."
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t))
 
-(defun lsp-hierarchy--display (lsp-roots source-buffer buffer-name title view-type outgoing-or-direction)
-  "Display LSP-ROOTS, a list of (WORKSPACE . ITEM), in BUFFER-NAME.
-SOURCE-BUFFER is the original buffer where the request was made.
-TITLE is used as the mode name.
-VIEW-TYPE is either \='call or \='type.
-OUTGOING-OR-DIRECTION specifies the direction of the hierarchy."
-  (let ((buf (get-buffer-create buffer-name))
-        initial-nodes)
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (lsp-hierarchy-mode)
-        (setf (lsp-hierarchy--view-source lsp-hierarchy--view) source-buffer
-              (lsp-hierarchy--view-kind lsp-hierarchy--view) view-type
-              (lsp-hierarchy--view-direction lsp-hierarchy--view) outgoing-or-direction)
-        (setq mode-name title)
-        ;; Root entries retain the workspace that produced each protocol item.
-        ;; Opaque item data must never be resolved by a different server.
-        (dolist (entry lsp-roots)
-          (let ((item (lsp-hierarchy--symbol-node (cdr entry) (car entry))))
-            (push item (lsp-hierarchy--view-roots lsp-hierarchy--view))
-            (setf (lsp-hierarchy--node-expanded item) nil)
-            (puthash (lsp-hierarchy--node-id item) item (lsp-hierarchy--view-nodes lsp-hierarchy--view))
-            (let ((start (point)))
-              (lsp-hierarchy--insert-node item 0)
-              (push (cons item (copy-marker start t)) initial-nodes)))))
-      (setf (lsp-hierarchy--view-roots lsp-hierarchy--view)
-            (nreverse (lsp-hierarchy--view-roots lsp-hierarchy--view)))
-      (goto-char (point-min))
-      (unwind-protect
-          (when (> lsp-hierarchy-expand-depth 0)
-            (dolist (entry (reverse initial-nodes))
-              (save-excursion
-                (goto-char (cdr entry))
-                (lsp-hierarchy--load-async (car entry) 0 lsp-hierarchy-expand-depth))))
-        (dolist (entry initial-nodes) (set-marker (cdr entry) nil))))
-    (pop-to-buffer buf)))
+(defun lsp-hierarchy--display (roots)
+  "Populate the current view from (WORKSPACE . ITEM) pairs in ROOTS."
+  (let ((nodes (mapcar (lambda (entry)
+                         (lsp-hierarchy--symbol-node (cdr entry) (car entry)))
+                       roots)))
+    (setf (lsp-hierarchy--view-roots lsp-hierarchy--view) nodes
+          (lsp-hierarchy--view-status lsp-hierarchy--view) 'ready)
+    (lsp-hierarchy--render)
+    (dolist (node nodes)
+      (puthash (lsp-hierarchy--node-id node) node
+               (lsp-hierarchy--view-nodes lsp-hierarchy--view)))
+    (when (> lsp-hierarchy-expand-depth 0)
+      (dolist (node nodes)
+        (lsp-hierarchy--load-async node lsp-hierarchy-expand-depth)))))
 
 ;;; --- LSP Backends & Views Implementation ---
 
@@ -674,6 +640,13 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
          (error (funcall error-handler err))))
      error-handler token (list workspace))))
 
+(defun lsp-hierarchy--prepare-failed (err)
+  "Record ERR and display a failed root request in the current view."
+  (setf (lsp-hierarchy--view-roots lsp-hierarchy--view) nil
+        (lsp-hierarchy--view-status lsp-hierarchy--view) 'error
+        (lsp-hierarchy--view-error lsp-hierarchy--view) err)
+  (lsp-hierarchy--render))
+
 (defun lsp-hierarchy--prepare (view-type direction)
   "Prepare VIEW-TYPE in DIRECTION, keeping only the latest requested view."
   (let* ((source (current-buffer))
@@ -691,7 +664,14 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
       ;; Resetting the mode cancels the previous generation before replacing
       ;; its text.  New requests belong to this view until completion or exit.
       (lsp-hierarchy-mode)
-      (let ((inhibit-read-only t)) (erase-buffer) (insert "Loading hierarchy...\n"))
+      (setf (lsp-hierarchy--view-source lsp-hierarchy--view) source
+            (lsp-hierarchy--view-kind lsp-hierarchy--view) view-type
+            (lsp-hierarchy--view-direction lsp-hierarchy--view) direction
+            (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading)
+      (setq mode-name (if (eq view-type 'call)
+                          (if direction "Outgoing Calls" "Incoming Calls")
+                        (if (eq direction 'supertypes) "Supertypes" "Subtypes")))
+      (lsp-hierarchy--render)
       (lsp-hierarchy--request
        source
        method params
@@ -700,16 +680,10 @@ request.  Only this adapter knows which hierarchy protocol methods to use."
            (dolist (response responses)
              (seq-doseq (root (cdr response))
                (push (cons (car response) root) roots)))
-           (lsp-hierarchy--display
-          (nreverse roots) source name
-          (if (eq view-type 'call)
-              (if direction "Outgoing Calls" "Incoming Calls")
-            (if (eq direction 'supertypes) "Supertypes" "Subtypes"))
-          view-type direction)))
-       (lambda (err)
-         (let ((inhibit-read-only t))
-           (erase-buffer)
-           (insert "Unable to load hierarchy: " (lsp-hierarchy--error-message err) "\n")))
+           (condition-case err
+               (lsp-hierarchy--display (nreverse roots))
+             (error (lsp-hierarchy--prepare-failed err)))))
+       #'lsp-hierarchy--prepare-failed
        nil workspaces t))
     (pop-to-buffer view)))
 
@@ -728,8 +702,6 @@ If SUPER is non-nil (or when called with a prefix argument),
 show supertypes.  Otherwise, show subtypes."
   (interactive "P")
   (lsp-hierarchy--prepare 'type (if super 'supertypes 'subtypes)))
-
-
 
 (provide 'lsp-hierarchy)
 ;;; lsp-hierarchy.el ends here
