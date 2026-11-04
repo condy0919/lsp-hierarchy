@@ -383,7 +383,12 @@ or asks a language server to discover more nodes."
                (when direct
                  (dolist (site (lsp-hierarchy--node-call-sites node))
                    (puthash site t matches)))
-               (when (or direct descendant)
+               ;; Refresh replaces the cached descendants before loading
+               ;; them again.  Keep open loading/error branches reachable
+               ;; even if only those missing descendants match the filter.
+               (when (or direct descendant
+                         (and (lsp-hierarchy--node-expanded node)
+                              (memq (lsp-hierarchy--node-load-state node) '(loading error))))
                  (puthash node t matches)))))
         (mapc #'visit roots))
       matches)))

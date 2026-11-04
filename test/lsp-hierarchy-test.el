@@ -1699,5 +1699,31 @@
                   (lsp-hierarchy--saved-node-expanded (cdr pair)))))))
 
 
+(ert-deftest lsp-hierarchy-filter-keeps-refresh-status-and-retry-visible ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show 'type)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--type-children "target")
+      (lsp-hierarchy-filter "target")
+      (lsp-hierarchy-refresh)
+      (lsp-hierarchy-test--roots "root")
+      (let ((root (lsp-hierarchy-test--node "root")))
+        (should (string-match-p "Loading" (buffer-string)))
+        (should (lsp-hierarchy-test--node-position root))
+        (lsp-hierarchy-test--reply
+         (car lsp-hierarchy-test--sent)
+         (lsp-make-json-error :code -32603 :message "Try again") t)
+        (should (string-match-p "Try again.*TAB to retry" (buffer-string)))
+        (goto-char (text-property-any (point-min) (point-max)
+                                     'lsp-hierarchy-status-node root))
+        (let ((requests (length lsp-hierarchy-test--sent)))
+          (lsp-hierarchy-smart-tab)
+          (should (= (1+ requests) (length lsp-hierarchy-test--sent))))
+        (lsp-hierarchy-test--type-children "target")
+        (should (lsp-hierarchy-test--node-position (lsp-hierarchy-test--node "target")))
+        (should-not (string-match-p "Try again\\|Loading" (buffer-string)))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
