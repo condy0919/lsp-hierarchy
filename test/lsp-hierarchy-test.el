@@ -2015,5 +2015,120 @@
         (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node "root")))))))
 
 
+(ert-deftest lsp-hierarchy-refresh-restores-nonselected-window-point ()
+  (save-window-excursion
+    (lsp-hierarchy-test--with-session
+      (let* ((source-window (selected-window))
+             (tree-window (split-window-right))
+             (view (lsp-hierarchy-test--show 'type)))
+        (set-window-buffer source-window lsp-hierarchy-test--source)
+        (set-window-buffer tree-window view)
+        (with-current-buffer view
+          (lsp-hierarchy-test--focused-deep-tree)
+          (set-window-point tree-window (point))
+          (lsp-hierarchy-test--interactive-refresh)
+          (lsp-hierarchy-test--roots "root")
+          (lsp-hierarchy-test--type-children "child")
+          (lsp-hierarchy-test--type-children "leaf")
+          (should (eq (selected-window) source-window))
+          (should (eq (window-buffer source-window) lsp-hierarchy-test--source))
+          (should (eq (window-buffer tree-window) view))
+          (should (eq (get-text-property (window-point tree-window) 'lsp-hierarchy-item)
+                      (lsp-hierarchy-test--node "leaf")))
+          (save-excursion
+            (goto-char (window-point tree-window))
+            (should (= 6 (current-column))))
+          (should-not (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view)))))))
+
+(ert-deftest lsp-hierarchy-refresh-preserves-independent-window-paths ()
+  (save-window-excursion
+    (lsp-hierarchy-test--with-session
+      (let* ((source-window (selected-window))
+             (deep-window (split-window-right))
+             (sibling-window (split-window-below nil deep-window))
+             (view (lsp-hierarchy-test--show 'type)))
+        (set-window-buffer source-window lsp-hierarchy-test--source)
+        (set-window-buffer deep-window view)
+        (set-window-buffer sibling-window view)
+        (with-current-buffer view
+          (lsp-hierarchy-test--roots "root" "sibling")
+          (lsp-hierarchy-test--toggle "root")
+          (lsp-hierarchy-test--type-children "child")
+          (lsp-hierarchy-test--toggle "child")
+          (lsp-hierarchy-test--type-children "leaf")
+          (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "leaf"))
+          (move-to-column 6)
+          (set-window-point deep-window (point))
+          (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "sibling"))
+          (move-to-column 3)
+          (set-window-point sibling-window (point))
+          ;; Buffer point has a shallower target than either window cursor.
+          (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "root"))
+          (lsp-hierarchy-test--interactive-refresh)
+          (lsp-hierarchy-test--roots "root" "sibling")
+          (should-not (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
+          (should (assq deep-window (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view)))
+          (lsp-hierarchy-test--interactive-refresh)
+          (lsp-hierarchy-test--roots "root" "sibling")
+          (lsp-hierarchy-test--type-children "child")
+          (lsp-hierarchy-test--type-children "leaf")
+          (dolist (expected (list (list deep-window "leaf" 6) (list sibling-window "sibling" 3)))
+            (save-excursion
+              (goto-char (window-point (car expected)))
+              (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node (cadr expected))))
+              (should (= (current-column) (nth 2 expected)))))
+          (should (eq (selected-window) source-window))
+          (should (eq (window-buffer source-window) lsp-hierarchy-test--source)))))))
+
+(ert-deftest lsp-hierarchy-refresh-window-movement-cancels-late-focus ()
+  (save-window-excursion
+    (lsp-hierarchy-test--with-session
+      (let* ((source-window (selected-window))
+             (tree-window (split-window-right))
+             (view (lsp-hierarchy-test--show 'type)))
+        (set-window-buffer source-window lsp-hierarchy-test--source)
+        (set-window-buffer tree-window view)
+        (with-current-buffer view
+          (lsp-hierarchy-test--roots "root" "sibling")
+          (lsp-hierarchy-test--toggle "root")
+          (lsp-hierarchy-test--type-children "child")
+          (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "child"))
+          (set-window-point tree-window (point))
+          (lsp-hierarchy-test--interactive-refresh)
+          (lsp-hierarchy-test--roots "root" "sibling")
+          (select-window tree-window)
+          (let ((this-command 'lsp-hierarchy-next-sibling))
+            (run-hooks 'pre-command-hook))
+          (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "sibling"))
+          (select-window source-window)
+          (set-buffer view)
+          (should-not (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view))
+          (lsp-hierarchy-test--type-children "child")
+          (should (eq (get-text-property (window-point tree-window) 'lsp-hierarchy-item)
+                      (lsp-hierarchy-test--node "sibling")))
+          (should (eq (selected-window) source-window)))))))
+
+(ert-deftest lsp-hierarchy-refresh-skips-windows-showing-other-buffers ()
+  (save-window-excursion
+    (lsp-hierarchy-test--with-session
+      (let* ((source-window (selected-window))
+             (tree-window (split-window-right))
+             (view (lsp-hierarchy-test--show 'type)))
+        (set-window-buffer source-window lsp-hierarchy-test--source)
+        (set-window-buffer tree-window view)
+        (with-current-buffer view
+          (lsp-hierarchy-test--focused-deep-tree)
+          (set-window-point tree-window (point))
+          (lsp-hierarchy-test--interactive-refresh)
+          (set-window-buffer tree-window lsp-hierarchy-test--source)
+          (set-window-point tree-window 1)
+          (lsp-hierarchy-test--roots "root")
+          (lsp-hierarchy-test--type-children "child")
+          (lsp-hierarchy-test--type-children "leaf")
+          (should (= 1 (window-point tree-window)))
+          (should-not (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view))
+          (should (eq (selected-window) source-window)))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

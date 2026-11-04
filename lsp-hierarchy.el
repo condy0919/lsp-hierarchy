@@ -135,7 +135,7 @@ several paths lead to the same protocol item."
   source origin kind direction roots (status 'ready) error
   ;; Keep pending focus separate: a user command cancels cursor restoration,
   ;; while expansion can continue asynchronously until the saved path loads.
-  restore restore-focus
+  restore restore-focus restore-window-focus
   (generation (make-symbol "lsp-hierarchy-view"))
   (requests (make-hash-table :test 'eq))
   (file-cache (make-hash-table :test 'equal))
@@ -1099,7 +1099,9 @@ RESTORE is an optional snapshot of expansion and point before refresh."
             (lsp-hierarchy--view-direction lsp-hierarchy--view) direction
             (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading
             (lsp-hierarchy--view-restore lsp-hierarchy--view) restore
-            (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) (plist-get restore :focus))
+            (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) (plist-get restore :focus)
+            (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view)
+            (plist-get restore :window-focus))
       (setq mode-name (if (eq view-type 'call)
                           (if direction "Outgoing Calls" "Incoming Calls")
                         (if (eq direction 'supertypes) "Supertypes" "Subtypes")))
@@ -1136,9 +1138,23 @@ RESTORE is an optional snapshot of expansion and point before refresh."
   "Snapshot expansion and point without retaining old nodes or server data."
   (let ((anchor (lsp-hierarchy--anchor (point)))
         (pending (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
-        (replacements (make-hash-table :test 'eq)) focus)
+        (windows (mapcar (lambda (window)
+                           (cons window (lsp-hierarchy--anchor (window-point window))))
+                         (get-buffer-window-list (current-buffer) nil t)))
+        (replacements (make-hash-table :test 'eq)) focus window-focus)
     (cl-labels
-        ((save-node (node path)
+        ((rebase (saved-focus)
+           (cons (mapcar (lambda (old) (or (gethash old replacements) old))
+                         (car saved-focus))
+                 (cdr saved-focus)))
+         (pending-windows ()
+           ;; Each window owns its cursor, including when another buffer is
+           ;; selected.  Keep only windows still displaying this view.
+           (dolist (entry (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view))
+             (when (assq (car entry) windows)
+               (setf (alist-get (car entry) window-focus) (rebase (cdr entry)))))
+           window-focus)
+         (save-node (node path)
            (let* ((saved (lsp-hierarchy--make-saved-node
                           :workspace (lsp-hierarchy--node-workspace node)
                           :key (lsp-hierarchy--refresh-key node)
@@ -1148,6 +1164,9 @@ RESTORE is an optional snapshot of expansion and point before refresh."
                (puthash previous saved replacements))
              (when (eq node (car anchor))
                (setq focus (list path (cadr anchor) (nth 2 anchor))))
+             (dolist (entry windows)
+               (when (eq node (cadr entry))
+                 (push (cons (car entry) (list path (nth 2 entry) (nth 3 entry))) window-focus)))
              (setf (lsp-hierarchy--saved-node-children saved)
                    (mapcar (lambda (child) (save-node child path))
                            (lsp-hierarchy--node-children node)))
@@ -1170,17 +1189,14 @@ RESTORE is an optional snapshot of expansion and point before refresh."
             ;; Rebase that deeper path onto snapshots created for fresh rows;
             ;; unloaded descendants still share their immutable saved records.
             (when pending
-              (setq focus
-                    (cons (mapcar (lambda (old) (or (gethash old replacements) old))
-                                  (car pending))
-                          (cdr pending))))
-            (list :roots saved :focus focus))
+              (setq focus (rebase pending)))
+            (list :roots saved :focus focus :window-focus (pending-windows)))
         ;; Before prepare finishes there are no new rows to snapshot.  Only
         ;; the live focus slot may survive; the original snapshot's focus
         ;; could already have been cancelled by a user command.
         (when-let* (((memq (lsp-hierarchy--view-status lsp-hierarchy--view) '(loading error)))
                     (roots (plist-get (lsp-hierarchy--view-restore lsp-hierarchy--view) :roots)))
-          (list :roots roots :focus (lsp-hierarchy--view-restore-focus lsp-hierarchy--view)))))))
+          (list :roots roots :focus pending :window-focus (pending-windows)))))))
 
 (defun lsp-hierarchy--match-restore (nodes snapshots)
   "Match fresh NODES to sibling SNAPSHOTS, preserving each occurrence.
@@ -1242,29 +1258,48 @@ only unloaded nodes may start automatically, using their new protocol items."
 (defun lsp-hierarchy--cancel-restore-focus ()
   "Clear pending focus without changing saved expansion choices."
   (when (lsp-hierarchy--view-p lsp-hierarchy--view)
-    (setf (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) nil)))
+    (setf (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) nil
+          (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view) nil)))
+
+(defun lsp-hierarchy--resolve-focus (focus)
+  "Return (POSITION . PENDING) for the saved FOCUS path.
+POSITION is its deepest visible match.  PENDING means an open ancestor is
+still loading the missing path, or prepare has failed and remains retryable."
+  (let ((path (car focus))
+        (nodes (lsp-hierarchy--view-roots lsp-hierarchy--view))
+        node next)
+    (while (and path
+                (setq next (seq-find (lambda (candidate)
+                                       (eq (car path) (lsp-hierarchy--node-restore candidate)))
+                                     nodes)))
+      (setq node next path (cdr path)
+            nodes (and (lsp-hierarchy--node-expanded node)
+                       (lsp-hierarchy--node-children node))))
+    (cons (and node (lsp-hierarchy--anchor-position
+                     (list node (cadr focus) (and (null path) (nth 2 focus)))))
+          (or (memq (lsp-hierarchy--view-status lsp-hierarchy--view) '(loading error))
+              (and path node (lsp-hierarchy--node-expanded node)
+                   (memq (lsp-hierarchy--node-load-state node) '(unloaded loading)))))))
 
 (defun lsp-hierarchy--restore-focus ()
-  "Restore the deepest visible match for the pending saved point.
-Keep waiting only when an open ancestor is still loading the missing path."
+  "Restore pending buffer and window points without selecting any window."
   (when-let* ((focus (lsp-hierarchy--view-restore-focus lsp-hierarchy--view)))
-    (let ((path (car focus))
-          (nodes (lsp-hierarchy--view-roots lsp-hierarchy--view))
-          node next)
-      (while (and path
-                  (setq next (seq-find (lambda (candidate)
-                                         (eq (car path) (lsp-hierarchy--node-restore candidate)))
-                                       nodes)))
-        (setq node next path (cdr path)
-              nodes (and (lsp-hierarchy--node-expanded node)
-                         (lsp-hierarchy--node-children node))))
-      (when node
-        (goto-char (lsp-hierarchy--anchor-position
-                    (list node (cadr focus) (and (null path) (nth 2 focus))))))
-      (unless (or (memq (lsp-hierarchy--view-status lsp-hierarchy--view) '(loading error))
-                  (and path node (lsp-hierarchy--node-expanded node)
-                       (memq (lsp-hierarchy--node-load-state node) '(unloaded loading))))
-        (lsp-hierarchy--cancel-restore-focus)))))
+    (let ((result (lsp-hierarchy--resolve-focus focus)))
+      (when (car result) (goto-char (car result)))
+      (unless (cdr result)
+        (setf (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) nil))))
+  ;; `goto-char' only updates buffer point.  Nonselected windows need an
+  ;; explicit update, using their own saved path rather than the main cursor.
+  (setf (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view)
+        (delq nil
+              (mapcar
+               (lambda (entry)
+                 (let ((window (car entry)))
+                   (when (and (window-live-p window) (eq (window-buffer window) (current-buffer)))
+                     (let ((result (lsp-hierarchy--resolve-focus (cdr entry))))
+                       (when (car result) (set-window-point window (car result)))
+                       (and (cdr result) entry)))))
+               (lsp-hierarchy--view-restore-window-focus lsp-hierarchy--view)))))
 
 (defun lsp-hierarchy-refresh (&optional reset)
   "Refresh this view at its original source position.

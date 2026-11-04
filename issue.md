@@ -61,6 +61,12 @@
 - **位置**：`lsp-hierarchy--render`（L526-L532）与 `lsp-hierarchy--restore-focus`（L1203-L1223）
 - **原因**：`lsp-hierarchy--render`（L527-L530）先对所有展示该 buffer 的窗口调用 `set-window-point` 恢复旧锚点，最后在 L532 调用 `lsp-hierarchy--restore-focus`（L1218）仅执行了 `(goto-char ...)`。如果异步响应到达时 Hierarchy 窗口不是 `selected-window`（单元测试中 mock 了 `pop-to-buffer` 故未覆盖真实窗口），`goto-char` 不会更新非活动窗口的 `window-point`。
 
+**核查与处理（已修复）**
+
+- 问题存在；真实非选中窗口的回归用例在修复前失败，仅改变 buffer point 无法完成窗口游标恢复。
+- 为每个展示层级视图的窗口分别保存和重定位目标路径，异步恢复时调用 `set-window-point`，不选中窗口。多窗口各自保留位置；窗口已关闭或改显其他 buffer 时跳过，用户导航后取消待恢复位置。
+- 验证：覆盖后台显示、两个窗口独立位置、连续刷新与用户移动、窗口换 buffer；99 项 ERT 全部通过。
+
 ### 6. 在最后一个节点按 `TAB`（`lsp-hierarchy-smart-tab`）或 `n` 会将光标移到缓冲区末尾空行（`eobp`）
 - **位置**：`lsp-hierarchy-smart-tab`（L791-L800）
 - **原因**：当光标位于最后一个叶子节点或最后的 `code` 行时，按 `TAB` 会向后搜索下一个可见符号直至 `eobp`（最后一行 `\n` 之后的空行）且不回退光标。此时光标停留在无任何属性的空行上，后续按 `u`、`RET`、`SPC`、`M-p`、`<left>` 都会报错 `"No node here"`。
