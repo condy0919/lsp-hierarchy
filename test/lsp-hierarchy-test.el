@@ -175,5 +175,53 @@
       (should-not (get-buffer "*LSP Call Hierarchy*"))
       (should-not (get-buffer "*LSP Call Hierarchy*")))))
 
+(ert-deftest lsp-hierarchy-error-is-retryable ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (lsp-make-json-error :code -32603 :message "Server failure") t)
+      (let ((root (lsp-hierarchy-test--node "root")))
+        (should (not (gethash root lsp-hierarchy--loading-table)))
+        (should-not (gethash root lsp-hierarchy--loaded-table))
+        (should-not (string-match-p "Loading" (buffer-string)))
+        (lsp-hierarchy-test--toggle "root")
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) nil)
+        (should (gethash root lsp-hierarchy--loaded-table))
+        (should-not (gethash root lsp-hierarchy--loading-table))
+        (should (= 0 (hash-table-count lsp-hierarchy--requests)))))))
+
+(ert-deftest lsp-hierarchy-send-error-is-retryable ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (cl-letf (((symbol-function 'lsp--send-no-wait) (lambda (&rest _) (error "Send failed"))))
+        (lsp-hierarchy-test--toggle "root"))
+      (should (not (gethash (lsp-hierarchy-test--node "root") lsp-hierarchy--loading-table)))
+      (should (= 0 (hash-table-count lsp-hierarchy--requests)))
+      (should (= 0 (hash-table-count lsp--cancelable-requests)))
+      (should (= 0 (hash-table-count lsp--request-cleanup-hooks)))
+      (should-not (string-match-p "Loading" (buffer-string))))))
+
+(ert-deftest lsp-hierarchy-source-kill-releases-pending-node ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (kill-buffer lsp-hierarchy-test--source)
+      (should (not (gethash (lsp-hierarchy-test--node "root") lsp-hierarchy--loading-table)))
+      (should (= 0 (hash-table-count lsp-hierarchy--requests)))
+      (lsp-hierarchy-test--toggle "root")
+      (should (not (gethash (lsp-hierarchy-test--node "root") lsp-hierarchy--loading-table))))))
+
+(ert-deftest lsp-hierarchy-failed-prepare-clears-loading ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (lsp-make-json-error :code -32603 :message "Server failure") t)
+      (should (string-match-p "Unable to load hierarchy" (buffer-string)))
+      (should-not (string-match-p "Loading" (buffer-string))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
