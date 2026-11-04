@@ -128,15 +128,17 @@ several paths lead to the same protocol item."
 
 (defun lsp-hierarchy--dispose ()
   "Invalidate the view and cancel all of its pending requests."
-  (setf (lsp-hierarchy--view-generation lsp-hierarchy--view) nil)
-  (when (lsp-hierarchy--view-requests lsp-hierarchy--view)
-    (maphash (lambda (token _) (lsp-hierarchy--cancel-request token)) (lsp-hierarchy--view-requests lsp-hierarchy--view))
-    (clrhash (lsp-hierarchy--view-requests lsp-hierarchy--view)))
-  (when (lsp-hierarchy--view-file-cache lsp-hierarchy--view)
-    (maphash (lambda (_ entry)
-               (when (buffer-live-p (cdr entry)) (kill-buffer (cdr entry))))
-             (lsp-hierarchy--view-file-cache lsp-hierarchy--view))
-    (clrhash (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
+  ;; Local kill hooks can survive a major-mode change after view locals are gone.
+  (when (lsp-hierarchy--view-p lsp-hierarchy--view)
+    (setf (lsp-hierarchy--view-generation lsp-hierarchy--view) nil)
+    (when (lsp-hierarchy--view-requests lsp-hierarchy--view)
+      (maphash (lambda (token _) (lsp-hierarchy--cancel-request token)) (lsp-hierarchy--view-requests lsp-hierarchy--view))
+      (clrhash (lsp-hierarchy--view-requests lsp-hierarchy--view)))
+    (when (lsp-hierarchy--view-file-cache lsp-hierarchy--view)
+      (maphash (lambda (_ entry)
+                 (when (buffer-live-p (cdr entry)) (kill-buffer (cdr entry))))
+               (lsp-hierarchy--view-file-cache lsp-hierarchy--view))
+      (clrhash (lsp-hierarchy--view-file-cache lsp-hierarchy--view)))))
 
 (defun lsp-hierarchy--error-message (err)
   "Format a protocol error, Lisp condition or string ERR."
@@ -177,13 +179,15 @@ Call SUCCESS or FAILURE at most once in the current view generation.
 TOKEN permits cancellation.  WORKSPACES restricts routing when supplied;
 NO-MERGE preserves workspace ownership of responses."
   (let ((view (current-buffer))
+        (model lsp-hierarchy--view)
         (generation (lsp-hierarchy--view-generation lsp-hierarchy--view))
         (token (or token (make-symbol "lsp-hierarchy-request"))))
     (puthash token t (lsp-hierarchy--view-requests lsp-hierarchy--view))
     (cl-labels ((finish (fn result)
                  (when (buffer-live-p view)
                    (with-current-buffer view
-                     (when (and (eq generation (lsp-hierarchy--view-generation lsp-hierarchy--view))
+                     (when (and (eq model lsp-hierarchy--view)
+                                (eq generation (lsp-hierarchy--view-generation model))
                                 (gethash token (lsp-hierarchy--view-requests lsp-hierarchy--view)))
                        (remhash token (lsp-hierarchy--view-requests lsp-hierarchy--view))
                        (when fn (funcall fn result)))))))

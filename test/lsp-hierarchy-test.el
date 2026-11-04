@@ -653,5 +653,19 @@
         (should (= 2 (length (lsp-hierarchy--node-children (lsp-hierarchy-test--node "root")))))
         (should (= 1 (how-many "alpha" (point-min) (point-max))))))))
 
+(ert-deftest lsp-hierarchy-late-response-after-major-mode-change-is-ignored ()
+  (lsp-hierarchy-test--with-session
+    (let* ((view (lsp-hierarchy-test--show))
+           (request (car lsp-hierarchy-test--sent)))
+      (with-current-buffer view
+        (fundamental-mode)
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert "Another view")))
+      (lsp-hierarchy-test--reply request (vector (lsp-hierarchy-test--item "late")))
+      (with-current-buffer view
+        (should (eq major-mode 'fundamental-mode))
+        (should (equal (buffer-string) "Another view"))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
