@@ -2130,5 +2130,83 @@
           (should (eq (selected-window) source-window)))))))
 
 
+(ert-deftest lsp-hierarchy-navigation-stays-on-final-leaf ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "leaf")
+      (lsp-hierarchy-test--toggle "leaf")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
+      (goto-char (point-min))
+      (move-to-column 4)
+      (let ((position (point))
+            (leaf (lsp-hierarchy-test--node "leaf")))
+        (dolist (command '(lsp-hierarchy-smart-tab lsp-hierarchy-next-line
+                           lsp-hierarchy-previous-line lsp-hierarchy-toggle))
+          (funcall command)
+          (should (= position (point)))
+          (should (eq (lsp-hierarchy--location-node-at-point) leaf)))))))
+
+(ert-deftest lsp-hierarchy-tab-keeps-final-call-site-and-finds-later-symbol ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer lsp-hierarchy-test--source (insert "target();\n"))
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply
+       (car lsp-hierarchy-test--sent)
+       (vector (lsp-hierarchy-test--call "caller" nil
+                                        (vector (lsp-hierarchy-test--range 0 0 6)))))
+      (lsp-hierarchy-test--toggle "caller")
+      (let* ((caller (lsp-hierarchy-test--node "caller"))
+             (site (car (lsp-hierarchy--node-call-sites caller))))
+        (lsp-hierarchy--goto-node site)
+        (move-to-column 9)
+        (let ((position (point)))
+          ;; A trailing Loading row is not a next symbol either.
+          (lsp-hierarchy-smart-tab)
+          (should (= position (point))))
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
+        (let ((position (point)))
+          (lsp-hierarchy-smart-tab)
+          (lsp-hierarchy-next-line)
+          (should (= position (point)))
+          (should (eq (lsp-hierarchy--location-node-at-point) site)))
+        (lsp-hierarchy-parent)
+        (should (eq (lsp-hierarchy--node-at-point) caller))
+        (let ((later (lsp-hierarchy--symbol-node (lsp-hierarchy-test--item "later")
+                                               (lsp-hierarchy--node-workspace caller))))
+          (setf (lsp-hierarchy--node-parent later) caller
+                (lsp-hierarchy--node-children caller) (list site later))
+          (lsp-hierarchy--render)
+          (lsp-hierarchy--goto-node site)
+          (lsp-hierarchy-smart-tab)
+          (should (eq (lsp-hierarchy--node-at-point) later)))))))
+
+(ert-deftest lsp-hierarchy-line-navigation-retains-status-rows-and-bounds ()
+  (dolist (failed '(nil t))
+    (lsp-hierarchy-test--with-session
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--toggle "root")
+        (when failed
+          (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                     (lsp-make-json-error :code -32603 :message "Failed") t))
+        (let* ((root (lsp-hierarchy-test--node "root"))
+               (status (text-property-any (point-min) (point-max) 'lsp-hierarchy-status-node root)))
+          (goto-char (point-min))
+          (lsp-hierarchy-next-line)
+          (should (= status (point)))
+          (lsp-hierarchy-next-line 100)
+          (should (= status (point)))
+          (lsp-hierarchy-previous-line 100)
+          (should (= (point-min) (point)))
+          (lsp-hierarchy-previous-line)
+          (should (= (point-min) (point)))
+          (lsp-hierarchy-previous-line -1)
+          (should (= status (point)))
+          (should (eq (key-binding (kbd "n")) #'lsp-hierarchy-next-line))
+          (should (eq (key-binding (kbd "p")) #'lsp-hierarchy-previous-line)))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

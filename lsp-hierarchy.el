@@ -608,6 +608,26 @@ An empty successful response is a leaf; an error remains retryable."
   (or (lsp-hierarchy--get-prop 'lsp-hierarchy-item)
       (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node)))
 
+(defun lsp-hierarchy--move-line (count)
+  "Move COUNT rows without stopping on the trailing empty line."
+  (let ((column (current-column)))
+    (forward-line count)
+    ;; Every rendered row ends with a newline.  Its trailing empty line has
+    ;; no node or status owner, so it is not a useful navigation destination.
+    (when (and (eobp) (bolp) (not (bobp)))
+      (forward-line -1))
+    (move-to-column column)))
+
+(defun lsp-hierarchy-next-line (&optional count)
+  "Move forward COUNT rows, stopping at the last nonempty row."
+  (interactive "p")
+  (lsp-hierarchy--move-line (or count 1)))
+
+(defun lsp-hierarchy-previous-line (&optional count)
+  "Move backward COUNT rows, stopping at the first row."
+  (interactive "p")
+  (lsp-hierarchy--move-line (- (or count 1))))
+
 (defun lsp-hierarchy--goto-node (node)
   "Move to the start of NODE's visible row."
   (let ((position (and node (text-property-any (point-min) (point-max)
@@ -676,7 +696,7 @@ A loading or failed branch is folded without cancelling or retrying it."
   (let ((node (lsp-hierarchy--node-at-point)))
     (unless node (user-error "No node here"))
     (cond
-     ((not (lsp-hierarchy--expandable-p node)) (forward-line 1))
+     ((not (lsp-hierarchy--expandable-p node)) (lsp-hierarchy-next-line))
      ((memq (lsp-hierarchy--node-load-state node) '(unloaded error))
       (lsp-hierarchy--load-async node))
      (t
@@ -810,15 +830,20 @@ Preview does not add an xref history entry or run jump hooks."
                                (lsp-hierarchy--node-range node) workspace))))))))
 
 (defun lsp-hierarchy-smart-tab ()
-  "Toggle the node at point, or move to the next visible symbol."
+  "Toggle the node at point, or move to the next visible symbol.
+Keep point unchanged when there is no later symbol."
   (interactive)
   (if (lsp-hierarchy--expandable-p (lsp-hierarchy--node-at-point))
       (lsp-hierarchy-toggle)
-    (forward-line 1)
-    (while (and (not (eobp))
-                (let ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item)))
-                  (not (and node (eq (lsp-hierarchy--node-type node) 'symbol)))))
-      (forward-line 1))))
+    (when-let* ((next
+                (save-excursion
+                  (let (found)
+                    (while (and (not found) (zerop (forward-line 1)) (not (eobp)))
+                      (when-let* ((node (lsp-hierarchy--get-prop 'lsp-hierarchy-item))
+                                  ((eq (lsp-hierarchy--node-type node) 'symbol)))
+                        (setq found (point))))
+                    found))))
+      (goto-char next))))
 
 ;;; Expansion Indicators
 
@@ -851,8 +876,8 @@ Preview does not add an xref history entry or run jump hooks."
 (defvar lsp-hierarchy-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "n") #'next-line)
-    (define-key map (kbd "p") #'previous-line)
+    (define-key map (kbd "n") #'lsp-hierarchy-next-line)
+    (define-key map (kbd "p") #'lsp-hierarchy-previous-line)
     (define-key map (kbd "u") #'lsp-hierarchy-parent)
     (define-key map (kbd "<left>") #'lsp-hierarchy-collapse-or-parent)
     (define-key map (kbd "M-n") #'lsp-hierarchy-next-sibling)
