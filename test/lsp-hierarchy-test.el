@@ -2469,5 +2469,59 @@
           (should (= 2 (length lsp-hierarchy-test--sent))))))))
 
 
+(ert-deftest lsp-hierarchy-filter-refresh-keeps-restoring-ancestor-focus ()
+  (dolist (windowp '(nil t))
+    (save-window-excursion
+      (lsp-hierarchy-test--with-session
+        (let* ((source-window (selected-window))
+               (tree-window (and windowp (split-window-right)))
+               (view (lsp-hierarchy-test--show)))
+          (when tree-window
+            (set-window-buffer source-window lsp-hierarchy-test--source)
+            (set-window-buffer tree-window view))
+          (with-current-buffer view
+            (cl-letf (((symbol-function 'lsp-hierarchy--extract-line)
+                       (lambda (&rest _) (ert-fail "Restoring a symbol must not read a folded call site"))))
+              (lsp-hierarchy-test--roots "ancestor" "leaf-other")
+              (lsp-hierarchy-test--toggle "ancestor")
+              (let ((calls (vector (lsp-hierarchy-test--call
+                                    "leaf" nil (vector (lsp-hierarchy-test--range 0 0 4))))))
+                (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) calls)
+                (lsp-hierarchy-filter "leaf")
+                (should (= 2 (length lsp-hierarchy-test--sent)))
+                (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "ancestor"))
+                (move-to-column 4)
+                (when tree-window (set-window-point tree-window (point)))
+                (lsp-hierarchy-test--interactive-refresh)
+                (lsp-hierarchy-test--roots "ancestor" "leaf-other")
+                (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node "ancestor")))
+                (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) calls)
+                (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node "ancestor")))
+                (should (= 4 (current-column)))
+                (should (= 4 (length lsp-hierarchy-test--sent)))
+                (when tree-window
+                  (should (eq (get-text-property (window-point tree-window) 'lsp-hierarchy-item)
+                              (lsp-hierarchy-test--node "ancestor")))
+                  (should (eq (selected-window) source-window)))))))))))
+
+(ert-deftest lsp-hierarchy-filter-does-not-reveal-suspended-restore-paths ()
+  (with-temp-buffer
+    (lsp-hierarchy-mode)
+    (let* ((parent (lsp-hierarchy--make-node :type 'symbol :name "parent" :load-state 'loaded))
+           (child (lsp-hierarchy--make-node :type 'symbol :name "child"
+                                           :parent parent :expanded t
+                                           :restore (lsp-hierarchy--make-saved-node :expanded t))))
+      (setf (lsp-hierarchy--node-children parent) (list child)
+            (lsp-hierarchy--view-roots lsp-hierarchy--view) (list parent))
+      (cl-letf (((symbol-function 'lsp-hierarchy--fetch-children)
+                 (lambda (&rest _) (ert-fail "Filtering must not send a request")))
+                ((symbol-function 'lsp-hierarchy--extract-line)
+                 (lambda (&rest _) (ert-fail "Filtering must not read source"))))
+        (lsp-hierarchy-filter "absent")
+        (should (equal (buffer-string) "No loaded symbols match the filter.\n"))
+        (should-not (lsp-hierarchy--node-expanded parent))
+        (should (eq (lsp-hierarchy--node-load-state child) 'unloaded))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

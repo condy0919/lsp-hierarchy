@@ -407,7 +407,14 @@ or asks a language server to discover more nodes."
                ;; even if only those missing descendants match the filter.
                (when (or direct descendant
                          (and (lsp-hierarchy--node-expanded node)
-                              (memq (lsp-hierarchy--node-load-state node) '(loading error))))
+                              (or (memq (lsp-hierarchy--node-load-state node) '(loading error))
+                                  ;; Restored nodes render once before their
+                                  ;; request starts.  Keep reachable pending
+                                  ;; paths visible so focus is not completed
+                                  ;; on a temporary filtered-out row.
+                                  (and (eq (lsp-hierarchy--node-load-state node) 'unloaded)
+                                       (lsp-hierarchy--node-restore node)
+                                       (lsp-hierarchy--visible-p node)))))
                  (puthash node t matches)))))
         (mapc #'visit roots))
       matches)))

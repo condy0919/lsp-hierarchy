@@ -57,6 +57,10 @@
 - 新的命令前钩子保留普通 `g`/revert 的恢复意图；导航、其他操作和 `C-u g` 仍取消它。prepare 失败时保留待恢复路径供重试；半完成刷新通过旧快照到新快照的身份映射重定位深层目标，避免把临时停留的祖先当成最终目标。
 - 验证：覆盖 prepare 等待时再次 `g`、失败后 revert、深层加载中再次刷新以及移动/重置后的取消；95 项 ERT 全部通过。
 
+**组合回归补充（已修复）**
+
+过滤与刷新同时启用时，待恢复祖先在发起请求前可能被短暂过滤掉，导致焦点提前落到另一个根节点。现在保留即将自动加载且祖先链已展开的恢复节点，直到其状态可正常显示；折叠祖先下暂停的路径不会因此被展示或加载。新增 buffer/非选中窗口回归及暂停路径检查，115 项 ERT 全部通过。
+
 ### 5. 非当前选中窗口显示 Hierarchy Buffer 时，异步恢复焦点未同步 `window-point`
 - **位置**：`lsp-hierarchy--render`（L526-L532）与 `lsp-hierarchy--restore-focus`（L1203-L1223）
 - **原因**：`lsp-hierarchy--render`（L527-L530）先对所有展示该 buffer 的窗口调用 `set-window-point` 恢复旧锚点，最后在 L532 调用 `lsp-hierarchy--restore-focus`（L1218）仅执行了 `(goto-char ...)`。如果异步响应到达时 Hierarchy 窗口不是 `selected-window`（单元测试中 mock 了 `pop-to-buffer` 故未覆盖真实窗口），`goto-char` 不会更新非活动窗口的 `window-point`。
