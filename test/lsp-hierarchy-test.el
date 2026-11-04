@@ -856,5 +856,30 @@
         (should (= 2 (how-many "Unavailable.*TAB" (point-min) (point-max))))
         (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view))))))))
 
+(ert-deftest lsp-hierarchy-known-call-sites-survive-pending-and-failed-relations ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer lsp-hierarchy-test--source (insert "target();\n"))
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "target")
+      (lsp-hierarchy-test--toggle "target")
+      (lsp-hierarchy-test--reply
+       (car lsp-hierarchy-test--sent)
+       (vector (lsp-hierarchy-test--call "caller" nil
+                                        (vector (lsp-hierarchy-test--range 0 0 6)))))
+      (let* ((caller (lsp-hierarchy-test--node "caller"))
+             (site (car (lsp-hierarchy--node-call-sites caller))))
+        (should-not (lsp-hierarchy-test--node-position site))
+        (lsp-hierarchy-test--toggle "caller")
+        (should (lsp-hierarchy-test--node-position site))
+        (should (string-match-p "target();" (buffer-string)))
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                   (lsp-make-json-error :code -32603 :message "Unavailable") t)
+        (should (lsp-hierarchy-test--node-position site))
+        (lsp-hierarchy-test--toggle "caller")
+        (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
+        (should (eq site (car (lsp-hierarchy--node-children caller))))
+        (should (= 1 (how-many "target();" (point-min) (point-max))))
+        (should (lsp-hierarchy--expandable-p caller))))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

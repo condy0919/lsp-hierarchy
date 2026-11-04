@@ -98,7 +98,8 @@ several paths lead to the same protocol item."
   ;; Protocol items belong to their server, including any opaque `data'.
   workspace lsp-item type name kind detail annotation uri range
   ;; call-sites describe the incoming edge, not the shared symbol itself.
-  ;; children contains the complete loaded rows, including those call sites.
+  ;; children starts with known call sites; relationship children are added
+  ;; when their independent request completes.
   parent children call-sites
   ;; Expansion is a user choice; loading can finish while a node is folded.
   ;; load-state is one of unloaded/loading/loaded/error.  A loaded empty
@@ -281,27 +282,26 @@ NO-MERGE preserves workspace ownership of responses."
   (let ((parent (lsp-hierarchy--node-parent node)))
     (or (null parent)
         (and (lsp-hierarchy--node-expanded parent)
-             (eq (lsp-hierarchy--node-load-state parent) 'loaded)
              (lsp-hierarchy--visible-p parent)))))
 
 (defun lsp-hierarchy--insert-subtree (node indent)
   "Render NODE and its visible descendants at INDENT."
   (lsp-hierarchy--insert-node node indent)
   (when (lsp-hierarchy--node-expanded node)
-    (pcase (lsp-hierarchy--node-load-state node)
-      ((or 'loading 'error)
-       (let* ((loading (eq (lsp-hierarchy--node-load-state node) 'loading))
-              (text (if loading "Loading..."
-                      (concat (lsp-hierarchy--single-line
-                               (lsp-hierarchy--error-message (lsp-hierarchy--node-error node)))
-                              " (TAB to retry)"))))
-         (insert (propertize (concat (make-string (* (1+ indent) 2) ?\s) "  " text "\n")
-                             'face (if loading 'lsp-hierarchy-detail-face 'error)
-                             'lsp-hierarchy-loading loading
-                             'lsp-hierarchy-status-node node))))
-      ('loaded
-       (dolist (child (lsp-hierarchy--node-children node))
-         (lsp-hierarchy--insert-subtree child (1+ indent)))))))
+    ;; Call sites are already known from the incoming edge.  They remain
+    ;; usable while the next level of relationships is loading or fails.
+    (dolist (child (lsp-hierarchy--node-children node))
+      (lsp-hierarchy--insert-subtree child (1+ indent)))
+    (when (memq (lsp-hierarchy--node-load-state node) '(loading error))
+      (let* ((loading (eq (lsp-hierarchy--node-load-state node) 'loading))
+             (text (if loading "Loading..."
+                     (concat (lsp-hierarchy--single-line
+                              (lsp-hierarchy--error-message (lsp-hierarchy--node-error node)))
+                             " (TAB to retry)"))))
+        (insert (propertize (concat (make-string (* (1+ indent) 2) ?\s) "  " text "\n")
+                            'face (if loading 'lsp-hierarchy-detail-face 'error)
+                            'lsp-hierarchy-loading loading
+                            'lsp-hierarchy-status-node node))))))
 
 (defun lsp-hierarchy--anchor (position)
   "Describe POSITION by node, column and row kind rather than text offsets."
@@ -443,8 +443,7 @@ An empty successful response is a leaf; an error remains retryable."
                  (progn
                    (lsp-hierarchy--render)
                    (dolist (child nodes)
-                     (puthash (lsp-hierarchy--node-id child) child
-                              (lsp-hierarchy--view-nodes lsp-hierarchy--view))))
+                     (lsp-hierarchy--register-node child)))
                (error
                 (setf (lsp-hierarchy--node-children node) previous)
                 (fail err)))
@@ -526,6 +525,14 @@ An empty successful response is a leaf; an error remains retryable."
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t))
 
+(defun lsp-hierarchy--register-node (node)
+  "Register NODE and its already known descendants in the current view."
+  (puthash (lsp-hierarchy--node-id node) node
+           (lsp-hierarchy--view-nodes lsp-hierarchy--view))
+  (dolist (child (lsp-hierarchy--node-children node))
+    (setf (lsp-hierarchy--node-parent child) node)
+    (lsp-hierarchy--register-node child)))
+
 (defun lsp-hierarchy--display (roots)
   "Populate the current view from (WORKSPACE . ITEM) pairs in ROOTS."
   (let ((nodes (mapcar (lambda (entry)
@@ -535,8 +542,7 @@ An empty successful response is a leaf; an error remains retryable."
           (lsp-hierarchy--view-status lsp-hierarchy--view) 'ready)
     (lsp-hierarchy--render)
     (dolist (node nodes)
-      (puthash (lsp-hierarchy--node-id node) node
-               (lsp-hierarchy--view-nodes lsp-hierarchy--view)))
+      (lsp-hierarchy--register-node node))
     (when (> lsp-hierarchy-expand-depth 0)
       (lsp-hierarchy--expand-nodes nodes lsp-hierarchy-expand-depth))))
 
@@ -651,7 +657,10 @@ This conversion only describes data; it never reads files or changes a view."
                (mapcar (lambda (range)
                          (lsp-hierarchy--make-node
                           :workspace workspace :type 'code :uri uri :range range))
-                       (append (lsp-get call :fromRanges) nil)))
+                       (append (lsp-get call :fromRanges) nil))
+               (lsp-hierarchy--node-children node) (lsp-hierarchy--node-call-sites node))
+         (dolist (site (lsp-hierarchy--node-call-sites node))
+           (setf (lsp-hierarchy--node-parent site) node))
          node))
      calls)))
 
