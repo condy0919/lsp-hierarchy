@@ -190,3 +190,82 @@ README 的模型与生命周期说明已同步；前文保留为原方案和第�
 前两轮的 9.0 验证结果保留为历史记录，后续验证以 10.0.0 及更新版本为准。
 
 在 Emacs 31.1 下，lsp-mode 10.0.0 / 10.0.1 × hash-table / plist 四组严格编译通过，各 53 项 ERT 全部通过，package-lint 通过。最低版本 10.0.0 下的真实 clangd UTF-8 / UTF-16 × 四种查询方向共八组验证通过。CI 的八种组合、Eask 依赖分支和最低版本断言也已检查。
+
+---
+
+## 七、 第四轮待精简项分析（基于 808 行版本）
+
+经过前三轮重构，`lsp-hierarchy.el` 已精简至 808 行。在此基础上继续排查，仍有以下 **5 处（合计约 60～80 行）** 可进一步收拢与精简：
+
+### 1. 移除子请求的冗余能力检查声明（节省 ~20 行）
+- **位置**：`lsp-hierarchy--method-requirements`（第 172–188 行）与 `lsp-hierarchy--request`（第 215–216 行）
+- **现状分析**：
+  - `lsp-hierarchy--prepare`（第 395–397 行）在发起根查询时，已经通过 `lsp--find-workspaces-for` 按 `"textDocument/prepareCallHierarchy"` / `"textDocument/prepareTypeHierarchy"` 过滤出了支持对应能力的 `workspaces`。
+  - 后续展开子节点调用 `lsp-hierarchy--request` 时，请求始终发往已通过校验的特定 `workspace`（`(lsp--buffer-workspaces (list workspace))`）。
+  - 在 `lsp-mode` 中，`lsp--find-workspaces-for` 对未出现在 `lsp-method-requirements` 中的方法默认直接返回当前全部 `(lsp-workspaces)`。
+- **精简方式**：
+  - 删除 `lsp-hierarchy--call-supported-p`（第 181–183 行）与 `lsp-hierarchy--type-supported-p`（第 185–187 行）。
+  - 删除 `lsp-hierarchy--method-requirements` 中后 4 条 `:check-command` 子方法声明（`callHierarchy/incomingCalls`、`callHierarchy/outgoingCalls`、`typeHierarchy/supertypes`、`typeHierarchy/subtypes`），仅保留 2 条 `prepare*` 的 `:capability` 声明供 `lsp-hierarchy--prepare` 使用。
+  - 删除 `lsp-hierarchy--request` 中多余的 `(lsp-method-requirements (append lsp-hierarchy--method-requirements lsp-method-requirements))` 绑定。
+
+**核验回复：采纳，已实施。** 保留两个 `prepare*` 能力声明及 `--prepare` 中的局部绑定，删除四个子方法声明、两个检查函数和 `--request` 的重复绑定。根请求仍负责能力筛选与动态注册识别，子请求仍检查服务器是否附着，并通过单元素 workspace 列表定向发送；不会因此扩大请求目标，也不修改全局能力表。
+
+此结论有别于“删除全部能力声明”：两个根方法的声明仍不可删除。如果根查询完成后服务器撤销能力，后续展开由服务器拒绝并进入现有错误/重试路径，不再重复检查 prepare 能力；用户在全局配置中设置的子方法禁用规则仍由 lsp-mode 执行。
+
+### 2. 简化源码快照缓存，移除每次渲染时的 `file-attributes` 系统调用（节省 ~15 行）
+- **位置**：`lsp-hierarchy--source-snapshot`（第 247–268 行）与 `lsp-hierarchy--dispose`（第 160–162 行）
+- **现状分析**：
+  - `lsp-hierarchy--source-snapshot` 每次读取未打开文件的调用点源码时，都会先调用 `(file-attributes filename)` 获取 `(mtime size)` 并与缓存比对，且手动抛出 `file-missing`。
+  - 实际上：① 已在 Emacs 中打开的文件已优先走 `(find-buffer-visiting filename)`；② 未打开的磁盘文件在单次未刷新的视图生命周期内，其 LSP `Range` 本就是静态快照，若磁盘文件被外部修改，旧 Range 在新文件内容上本就不具参考意义，而用户按 `g`（刷新）、`d`（切换方向）或关闭视图时都会触发 `lsp-hierarchy--dispose` 清空 `file-cache`；③ `insert-file-contents` 在文件不存在时原生就会抛出 `file-missing` 错误并被上层 `condition-case` 捕获降级。
+- **精简方式**：
+  - `file-cache` 直接存储 `filename -> snapshot-buffer`（不再包装 `(cons stamp buf)`）。
+  - 移除 `file-attributes` 预检查与时间戳比对：若 `file-cache` 中已有存活的 buffer 则直接复用，否则新建隐式 buffer 并调用 `insert-file-contents` 写入缓存；`lsp-hierarchy--dispose` 中直接 `(kill-buffer entry)`。
+
+**核验回复：采纳，已实施，明确调整缓存语义。** 缓存现在直接保存 `filename -> buffer`，不再查询文件属性或比较时间戳；首次读取后复用存活快照，刷新、切换方向或关闭视图时释放。已打开的源码 buffer 继续优先使用；快照被手动关闭后允许重新读取。
+
+这里不是严格的“查询时刻快照”：调用点第一次显示时才读取文件，也不能保证文本与 LSP Range 同时产生。因此采纳依据是简化缓存生命周期，而非保证坐标与文件版本一致。保留 `unwind-protect` 清理读取失败产生的临时 buffer 和失效缓存项，错误仍由上层显示为行号，随后可以重试。README 已同步这一行为变化。
+
+### 3. 统一展开深度分支与根节点构造（节省 ~15 行）
+- **位置**：`lsp-hierarchy--prepare-requests`（第 373–377 行）、`lsp-hierarchy--expand-nodes`（第 572–578 行）、`lsp-hierarchy--load-async`（第 593–596 行）、`lsp-hierarchy--display`（第 602–609 行）
+- **现状分析**：
+  - `lsp-hierarchy--display` 与 `lsp-hierarchy--load-async` 中重复编写了 `(if (> depth 0) (lsp-hierarchy--expand-nodes ...) (lsp-hierarchy--render))` 分支。
+  - `lsp-hierarchy--prepare-requests` 先将返回项包装为 `(cons workspace item)`，随后在 `lsp-hierarchy--display` 中再次 `mapcar` 拆包构造 `node`。
+- **精简方式**：
+  - 将 `(when (> depth 0) ...)` 下沉到 `lsp-hierarchy--expand-nodes` 内部，`lsp-hierarchy--display` 与 `lsp-hierarchy--load-async` 均先直接调用 `lsp-hierarchy--render`（或由 `expand-nodes` 统一处理 `depth <= 0` 时直接渲染），消除两处重复条件分支。
+  - 在 `lsp-hierarchy--prepare-requests` 收集结果时直接调用 `lsp-hierarchy--make-node` 构造节点列表，省去中间 `cons` 包装与二次遍历。
+
+**核验回复：采纳，已实施。** `--prepare-requests` 按服务器及返回项的原顺序直接构造根节点，`--display` 直接安装节点列表，删除每个 item 的中间 cons 和后续 mapcar。服务器响应聚合仍保留，以维持乱序响应下的显示顺序和“空结果也算成功”的行为。
+
+`--expand-nodes` 统一处理深度：大于零时批量请求，零或负数时只渲染；根显示和子节点响应都调用这一入口。原来的两处条件并不完全相同，子节点响应还必须检查自身及祖先的折叠状态，这些检查已保留：折叠时传入零深度，只缓存并重绘，不重新展开或继续请求。递归截断与批量渲染也保持原有行为。
+
+### 4. 统一 `lsp-hierarchy--position-to-point` 的参数签名（节省 ~5 行）
+- **位置**：`lsp-hierarchy--position-to-point`（第 229–238 行）、`lsp-hierarchy--extract-line`（第 273 行）、`lsp-hierarchy--location-point`（第 299 行）
+- **现状分析**：
+  - `lsp-hierarchy--point-to-position` 接收 `(point workspace)`，而对称函数 `lsp-hierarchy--position-to-point` 却接收 `(position &optional encoding)`，导致所有调用方都必须额外写出 `(lsp-hierarchy--position-encoding workspace)`。
+- **精简方式**：
+  - 将 `lsp-hierarchy--position-to-point` 签名统一为 `(position workspace)`，在内部调用 `lsp-hierarchy--position-encoding`，简化所有调用点。
+
+**核验回复：建议采纳，原签名描述有误。** 原实现实际为 `--point-to-position(workspace)`（读取当前 point）和 `--position-to-point(position encoding)`；前者没有显式 point 参数，后者的 encoding 也不是可选参数。
+
+已将后者改为 `(position workspace)`，在函数内部选择编码，并更新源码摘录和跳转调用点。这样两个方向都接收 workspace，调用者不再维护额外的 encoding 局部变量；UTF-8/16/32 的选择及 narrowing 处理保持原有行为。
+
+### 5. 收拢单次使用的薄包装函数与兼容别名（节省 ~20 行）
+- **位置**：
+  - `lsp-hierarchy--revert`（第 791–793 行）与 `lsp-hierarchy-refresh`（第 781 行）
+  - `lsp-hierarchy-smart-tab`（第 692 行）
+  - `lsp-hierarchy--symbol-node`（第 313–315 行）与 `lsp-hierarchy--call-nodes`（第 317–328 行）
+  - `lsp-hierarchy--insert-call-site`（第 487–495 行）
+- **精简方式**：
+  - 为 `lsp-hierarchy-refresh` 增加可选参数 `(&rest _)`，并将 `revert-buffer-function` 直接设为 `#'lsp-hierarchy-refresh`，删除 `lsp-hierarchy--revert`。
+  - 将测试文件 `test/lsp-hierarchy-test.el` 中仅剩的 2 处 `lsp-hierarchy-smart-tab` 调用改为 `lsp-hierarchy-toggle`，删除 `lsp-hierarchy-smart-tab` 兼容别名。
+  - 在 `lsp-hierarchy--call-nodes` 中直接向 `lsp-hierarchy--make-node` 传入 `:call-sites`，省去先调 `lsp-hierarchy--symbol-node` 再 `setf` 的两步操作。
+  - `lsp-hierarchy--insert-call-site` 仅在 `lsp-hierarchy--insert-subtree`（第 502–503 行）中调用一次，可与紧随其后的状态行一样直接内联。
+
+**核验回复：采纳，已实施；“单次使用”需结合本轮其他改动判断。**
+
+- `lsp-hierarchy-refresh` 接收并忽略 `revert-buffer` 传入的参数，模式直接将它设为刷新回调，删除 `--revert`。
+- 删除 `lsp-hierarchy-smart-tab` 别名，测试及实际按键统一使用 `lsp-hierarchy-toggle`；旧自定义绑定需要改用后者，README 已注明。
+- 调用节点通过 `--make-node` 一次设置 workspace、原始 item 和 call-sites，删除随后赋值的步骤。`--symbol-node` 原本有三个生产调用点，并非单次使用；结合第 3 项和调用节点改造后只剩类型节点构造，再直接调用构造器并移除薄包装。
+- 将调用点行插入逻辑内联到 `--insert-subtree`，仍按调用点、子符号、状态行分段，保留各行的归属、源码位置和鼠标动作属性。这里的收益是减少阅读跳转，单次调用本身并不是必须内联的理由。
+
+**本轮结果与验证：** 主文件由 808 行缩减为 773 行，净减少 35 行；原先合计 60～80 行的估计偏高，未为凑行数删除必要的失败清理和状态检查。测试调整为 54 项，新增刷新/切换方向后重建源码快照的回归，并更新固定快照、访问中 buffer 优先和读取失败可重试的测试。在 Emacs 31.1 下，lsp-mode 10.0.0 / 10.0.1 × hash-table / plist 四组严格编译及全部 54 项 ERT 通过，package-lint 通过；稳定版 10.0.0 下真实 clangd 的 UTF-8 / UTF-16 × 四方向八组验证通过，包含深度 0/2、加载中折叠、调用点导航、预览、刷新和方向切换。

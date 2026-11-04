@@ -167,7 +167,7 @@
                      (lsp-hierarchy-test--reply pending (vector (lsp-hierarchy-test--item "stale")))
                      (funcall cancel token)))
                   ((symbol-function 'lsp-hierarchy--display)
-                   (lambda (_roots) (setq displayed t))))
+                   (lambda (_nodes) (setq displayed t))))
           (lsp-hierarchy-refresh))
         (should-not displayed)
         (should-not (eq old-view lsp-hierarchy--view))
@@ -666,12 +666,12 @@
                 (should (= 1 (hash-table-count (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
                 (font-lock-ensure)
                 (should (string-match-p "foo();" (buffer-string)))
-                (let ((snapshot (cdr (gethash file (lsp-hierarchy--view-file-cache lsp-hierarchy--view)))))
+                (let ((snapshot (gethash file (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
                   (kill-buffer (current-buffer))
                   (should-not (buffer-live-p snapshot)))))))
       (delete-file file))))
 
-(ert-deftest lsp-hierarchy-file-cache-refresh-and-live-buffer-precedence ()
+(ert-deftest lsp-hierarchy-file-cache-keeps-snapshot-and-prefers-live-buffer ()
   (let ((file (make-temp-file "hierarchy-cache-" nil ".c" "old();\n"))
         visited)
     (unwind-protect
@@ -681,15 +681,40 @@
                  (range (lsp-hierarchy-test--range 0 0 3)))
             (should (string-prefix-p "old" (lsp-hierarchy--extract-line uri range)))
             (with-temp-file file (insert "updated();\n"))
+            ;; Existing ranges and their source snapshot stay together until
+            ;; the view is refreshed or the snapshot is explicitly killed.
+            (should (string-prefix-p "old" (lsp-hierarchy--extract-line uri range)))
+            (kill-buffer (lsp-hierarchy--source-snapshot file))
             (should (string-prefix-p "updated" (lsp-hierarchy--extract-line uri range)))
             (setq visited (find-file-noselect file))
             (with-current-buffer visited (erase-buffer) (insert "unsaved();\n"))
             (should (string-prefix-p "unsaved" (lsp-hierarchy--extract-line uri range)))
+            (lsp-hierarchy--dispose)
+            (should (buffer-live-p visited))
             (should (buffer-modified-p visited))))
       (when (buffer-live-p visited)
         (with-current-buffer visited (set-buffer-modified-p nil))
         (kill-buffer visited))
       (delete-file file))))
+
+(ert-deftest lsp-hierarchy-refresh-and-direction-switch-replace-source-snapshots ()
+  (dolist (command '(lsp-hierarchy-refresh lsp-hierarchy-switch-direction))
+    (let ((file (make-temp-file "hierarchy-snapshot-reset-" nil ".c" "old();\n")))
+      (unwind-protect
+          (lsp-hierarchy-test--with-session
+            (with-current-buffer (lsp-hierarchy-test--show 'type)
+              (lsp-hierarchy-test--reply-items "root")
+              (let* ((uri (lsp--path-to-uri file))
+                     (range (lsp-hierarchy-test--range 0 0 3))
+                     (snapshot (lsp-hierarchy--source-snapshot file)))
+                (with-temp-file file (insert "new();\n"))
+                (should (string-prefix-p "old" (lsp-hierarchy--extract-line uri range)))
+                (funcall command)
+                (should-not (buffer-live-p snapshot))
+                (should (= 0 (hash-table-count (lsp-hierarchy--view-file-cache lsp-hierarchy--view))))
+                (lsp-hierarchy-test--reply-items "root")
+                (should (string-prefix-p "new" (lsp-hierarchy--extract-line uri range))))))
+        (delete-file file)))))
 
 (ert-deftest lsp-hierarchy-empty-node-becomes-a-leaf ()
   (lsp-hierarchy-test--with-session
@@ -703,7 +728,7 @@
              (requests (length lsp-hierarchy-test--sent)))
         (should-not (lsp-hierarchy--expandable-p node))
         (goto-char pos)
-        (lsp-hierarchy-smart-tab)
+        (lsp-hierarchy-toggle)
         (should (eq (lsp-hierarchy--get-prop 'lsp-hierarchy-item)
                     (lsp-hierarchy-test--node "next")))
         (lsp-hierarchy-test--toggle "empty")
@@ -711,8 +736,9 @@
 
 (ert-deftest lsp-hierarchy-normalizes-call-edge-locations ()
   (let* ((workspace (lsp-hierarchy-test--workspace 'server))
-         (parent (lsp-hierarchy--symbol-node
-                  (lsp-hierarchy-test--item "parent" "file:///parent.c") workspace))
+         (parent (lsp-hierarchy--make-node
+                  :lsp-item (lsp-hierarchy-test--item "parent" "file:///parent.c")
+                  :workspace workspace))
          (item (lsp-hierarchy-test--item "child" "file:///child.c" '(opaque)))
          (range (lsp-hierarchy-test--range 0 1 4)))
     (dolist (outgoing '(nil t))
@@ -916,7 +942,7 @@
                 (lsp-hierarchy--insert-node
                  (let ((item (lsp-hierarchy-test--item "foo" "custom://symbol")))
                    (lsp-put item :selectionRange (lsp-hierarchy-test--range 1 2 5))
-                   (lsp-hierarchy--symbol-node item workspace)) 0))
+                   (lsp-hierarchy--make-node :lsp-item item :workspace workspace)) 0))
               (goto-char 3)
               (let ((xref-after-jump-hook (list (lambda () (setq jumped t)))))
                 (cl-letf (((symbol-function 'xref-push-marker-stack) (lambda () (setq pushed t))))
@@ -960,8 +986,8 @@
               (setq target (find-file-noselect file))
               (let ((inhibit-read-only t))
                 (lsp-hierarchy--insert-node
-                 (lsp-hierarchy--symbol-node
-                  (lsp-hierarchy-test--item "foo" (lsp--path-to-uri file)) nil) 0))
+                 (lsp-hierarchy--make-node
+                  :lsp-item (lsp-hierarchy-test--item "foo" (lsp--path-to-uri file))) 0))
               (goto-char 3)
               (should-error (lsp-hierarchy-preview) :type 'user-error)
               (should (eq (window-buffer window) view))
@@ -1017,8 +1043,8 @@
       (move-to-column 4)
       (let ((position (point))
             (leaf (lsp-hierarchy-test--node "leaf")))
-        (dolist (command '(lsp-hierarchy-smart-tab lsp-hierarchy-next-line
-                           lsp-hierarchy-previous-line lsp-hierarchy-toggle))
+        (dolist (command '(lsp-hierarchy-toggle lsp-hierarchy-next-line
+                           lsp-hierarchy-previous-line))
           (funcall command)
           (should (= position (point)))
           (should (eq (lsp-hierarchy--node-at-point) leaf)))))))
@@ -1051,8 +1077,9 @@
                          (list (lsp-hierarchy--node-workspace caller) (car site) (cdr site)))))
         (lsp-hierarchy-parent)
         (should (eq (lsp-hierarchy--node-at-point) caller))
-        (let ((later (lsp-hierarchy--symbol-node (lsp-hierarchy-test--item "later")
-                                               (lsp-hierarchy--node-workspace caller))))
+        (let ((later (lsp-hierarchy--make-node
+                      :lsp-item (lsp-hierarchy-test--item "later")
+                      :workspace (lsp-hierarchy--node-workspace caller))))
           (setf (lsp-hierarchy--node-parent later) caller
                 (lsp-hierarchy--node-children caller) (list later))
           (lsp-hierarchy--render)
@@ -1100,7 +1127,7 @@
           (should (= 3 (length lsp-hierarchy-test--sent)))
           (should (= 0 (hash-table-count (lsp-hierarchy--view-requests lsp-hierarchy--view)))))))))
 
-(ert-deftest lsp-hierarchy-failed-snapshot-reads-clean-new-and-stale-buffers ()
+(ert-deftest lsp-hierarchy-failed-snapshot-reads-clean-up-and-remain-retryable ()
   (let ((file (make-temp-file "hierarchy-read-failure-" nil ".c" "old();\n")))
     (unwind-protect
         (with-temp-buffer
@@ -1116,12 +1143,18 @@
             (should-not (buffer-live-p failed-buffer))
             (should (= 0 (hash-table-count cache)))
             (let ((snapshot (lsp-hierarchy--source-snapshot file)))
+              (should (equal (with-current-buffer snapshot (buffer-string)) "old();\n"))
+              (kill-buffer snapshot)
               (with-temp-file file (insert "changed source();\n"))
               (cl-letf (((symbol-function 'insert-file-contents)
-                         (lambda (&rest _) (signal 'file-error '("Read interrupted")))))
+                         (lambda (&rest _)
+                           (setq failed-buffer (current-buffer))
+                           (signal 'file-error '("Read interrupted")))))
                 (should-error (lsp-hierarchy--source-snapshot file) :type 'file-error))
-              (should-not (buffer-live-p snapshot))
-              (should (= 0 (hash-table-count cache))))))
+              (should-not (buffer-live-p failed-buffer))
+              (should (= 0 (hash-table-count cache)))
+              (should (equal (with-current-buffer (lsp-hierarchy--source-snapshot file) (buffer-string))
+                             "changed source();\n")))))
       (delete-file file))))
 
 (ert-deftest lsp-hierarchy-direction-switch-resets-paths-and-cancels-old-requests ()
