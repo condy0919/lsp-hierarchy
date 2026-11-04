@@ -1659,5 +1659,45 @@
           (should-not (lsp-hierarchy--view-restore-focus lsp-hierarchy--view)))))))
 
 
+(ert-deftest lsp-hierarchy-refresh-indexes-reordered-siblings-and-duplicates ()
+  (let* ((workspace-a (lsp-hierarchy-test--workspace 'server))
+         ;; Equal structs still represent distinct server connections.
+         (workspace-b (copy-sequence workspace-a))
+         (key-function (symbol-function 'lsp-hierarchy--refresh-key))
+         (key-count 0) nodes snapshots duplicates)
+    (should (equal workspace-a workspace-b))
+    (should-not (eq workspace-a workspace-b))
+    (dotimes (index 400)
+      (let ((node (lsp-hierarchy--make-node :workspace workspace-a :type 'symbol
+                                           :name (number-to-string index))))
+        (push node nodes)
+        (push (lsp-hierarchy--make-saved-node :workspace workspace-a
+                                             :key (lsp-hierarchy--refresh-key node)) snapshots)))
+    (setq snapshots (nreverse snapshots))
+    ;; Repeat the same key in both workspaces.  Fresh duplicate occurrences
+    ;; consume saved choices in order even when unique siblings are reversed.
+    (dolist (workspace (list workspace-a workspace-b workspace-a workspace-b))
+      (let* ((node (lsp-hierarchy--make-node :workspace workspace :type 'symbol :name "same"))
+             (saved (lsp-hierarchy--make-saved-node
+                     :workspace workspace :key (lsp-hierarchy--refresh-key node)
+                     :expanded (< (length duplicates) 2))))
+        (push (cons node saved) duplicates)))
+    (setq duplicates (nreverse duplicates)
+          nodes (append nodes (mapcar #'car duplicates))
+          snapshots (append snapshots (mapcar #'cdr duplicates)))
+    (cl-letf (((symbol-function 'lsp-hierarchy--refresh-key)
+               (lambda (node) (cl-incf key-count) (funcall key-function node))))
+      (lsp-hierarchy--match-restore nodes snapshots))
+    ;; This bounds key construction without a flaky elapsed-time assertion.
+    (should (= key-count (length nodes)))
+    (dolist (node nodes)
+      (should (equal (lsp-hierarchy--refresh-key node)
+                     (lsp-hierarchy--saved-node-key (lsp-hierarchy--node-restore node)))))
+    (dolist (pair duplicates)
+      (should (eq (lsp-hierarchy--node-restore (car pair)) (cdr pair)))
+      (should (eq (lsp-hierarchy--node-expanded (car pair))
+                  (lsp-hierarchy--saved-node-expanded (cdr pair)))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

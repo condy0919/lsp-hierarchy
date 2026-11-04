@@ -1128,24 +1128,29 @@ RESTORE is an optional snapshot of expansion and point before refresh."
   "Match fresh NODES to sibling SNAPSHOTS, preserving each occurrence.
 Workspaces compare by identity; equal siblings consume snapshots in order.
 Matching stays within one parent so shared symbols keep independent state."
-  (let ((remaining (copy-sequence snapshots)))
-    (dolist (node nodes)
-      (when-let* ((saved
-                  (seq-find
-                   (lambda (candidate)
-                     (and (eq (lsp-hierarchy--node-workspace node)
-                              (lsp-hierarchy--saved-node-workspace candidate))
-                          (equal (lsp-hierarchy--refresh-key node)
-                                 (lsp-hierarchy--saved-node-key candidate))))
-                   remaining)))
-        (setq remaining (delq saved remaining))
-        ;; Known call-site children can already have been matched before the
-        ;; relationship request.  Never overwrite a subsequent user choice.
-        (unless (lsp-hierarchy--node-restore node)
-          (setf (lsp-hierarchy--node-restore node) saved
-                (lsp-hierarchy--node-expanded node) (lsp-hierarchy--saved-node-expanded saved))
-          (lsp-hierarchy--match-restore (lsp-hierarchy--node-children node)
-                                        (lsp-hierarchy--saved-node-children saved)))))))
+  (when snapshots
+    (let ((workspaces (make-hash-table :test 'eq)))
+      ;; Workspace structs are mutable: only scalar keys belong in an equal
+      ;; table.  Reversed insertion makes each bucket a queue in sibling order.
+      (dolist (saved (reverse snapshots))
+        (let* ((workspace (lsp-hierarchy--saved-node-workspace saved))
+               (items (or (gethash workspace workspaces)
+                          (puthash workspace (make-hash-table :test 'equal) workspaces)))
+               (key (lsp-hierarchy--saved-node-key saved)))
+          (puthash key (cons saved (gethash key items)) items)))
+      (dolist (node nodes)
+        (when-let* ((items (gethash (lsp-hierarchy--node-workspace node) workspaces))
+                    (key (lsp-hierarchy--refresh-key node))
+                    (queue (gethash key items))
+                    (saved (car queue)))
+          (puthash key (cdr queue) items)
+          ;; Known call sites may have been matched before this response.
+          ;; Consume their snapshot, but preserve any subsequent user choice.
+          (unless (lsp-hierarchy--node-restore node)
+            (setf (lsp-hierarchy--node-restore node) saved
+                  (lsp-hierarchy--node-expanded node) (lsp-hierarchy--saved-node-expanded saved))
+            (lsp-hierarchy--match-restore (lsp-hierarchy--node-children node)
+                                          (lsp-hierarchy--saved-node-children saved))))))))
 
 (defun lsp-hierarchy--resume-restore (nodes)
   "Continue saved expansions below visible, open NODES.
