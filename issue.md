@@ -141,6 +141,12 @@
 ### 1. 刷新（`lsp-hierarchy-refresh`）不应无条件调用 `pop-to-buffer`
 - 在 `lsp-hierarchy--prepare`（L1098）末尾无条件调用了 `(pop-to-buffer view)`。当传入 `target`（即 `g` 或 `revert-buffer` 刷新已有视图）时，若从后台或非当前窗口触发 `revert-buffer`，会强行抢占窗口焦点。建议仅在 `target` 为 `nil`（初次打开视图）时 `pop-to-buffer`。
 
+**核查与处理（已修复）**
+
+- 问题存在，`--prepare` 原来对已有 target 也无条件调用 `pop-to-buffer`。
+- 现在只有打开新查询时才选择显示窗口；刷新已有视图直接返回目标 buffer，允许后台 revert 保持当前窗口及光标。
+- 验证：使用真实窗口分别测试视图已显示/未显示的后台刷新，禁止调用 `pop-to-buffer`，检查源窗口位置不变且请求正常发出；113 项 ERT 全部通过。
+
 ### 2. 缺少视图状态（过滤条件 / 排序方式 / 层次方向）的直观展示
 - 当前激活 `/` 过滤（`lsp-hierarchy-filter-regexp`）或 `s` 切换排序（`lsp-hierarchy-sort-order`）后，除了回显区短暂的 `message` 外，Buffer 和 Mode-line 没有任何持久标识。建议利用 `header-line-format` 或 `mode-line-process` 展示当前的排序模式与过滤正则。
 

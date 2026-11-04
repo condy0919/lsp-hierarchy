@@ -1183,7 +1183,9 @@ RESTORE is an optional snapshot of expansion and point before refresh."
              (error (lsp-hierarchy--prepare-failed err)))))
        #'lsp-hierarchy--prepare-failed
        nil workspaces t))
-    (pop-to-buffer view)))
+    ;; Refreshing an existing view can run from `revert-buffer' in the
+    ;; background.  Only opening a new query should choose a window.
+    (if target view (pop-to-buffer view))))
 
 ;;; Refresh State
 

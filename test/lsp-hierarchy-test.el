@@ -2443,5 +2443,31 @@
                    (lsp-hierarchy--anchor-position (list z 0 t))))))))
 
 
+(ert-deftest lsp-hierarchy-background-refresh-does-not-display-or-select-view ()
+  (dolist (shown '(nil t))
+    (save-window-excursion
+      (delete-other-windows)
+      (lsp-hierarchy-test--with-session
+        (with-current-buffer lsp-hierarchy-test--source (insert "source contents\n"))
+        (let* ((view (lsp-hierarchy-test--show))
+               (source-window (selected-window))
+               (tree-window (when shown (split-window-right))))
+          (set-window-buffer source-window lsp-hierarchy-test--source)
+          (set-window-point source-window 5)
+          (when tree-window (set-window-buffer tree-window view))
+          (with-current-buffer view
+            (lsp-hierarchy-test--roots "root")
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (&rest _) (ert-fail "Background refresh must not choose a window"))))
+              (revert-buffer nil t)))
+          (should (eq (selected-window) source-window))
+          (should (eq (window-buffer source-window) lsp-hierarchy-test--source))
+          (should (= 5 (window-point source-window)))
+          (if shown
+              (should (eq (window-buffer tree-window) view))
+            (should-not (get-buffer-window view t)))
+          (should (= 2 (length lsp-hierarchy-test--sent))))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
