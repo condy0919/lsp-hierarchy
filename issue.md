@@ -51,6 +51,12 @@
   2. 当根节点请求失败进入 `'error` 状态时，`lsp-hierarchy--prepare-failed`（L1043-L1048）调用 `lsp-hierarchy--render`，进而使 `lsp-hierarchy--restore-focus`（L1220-L1223）立即取消 `restore-focus`，导致 `lsp-hierarchy--save-refresh-state`（L1146-L1148）中专门为 `'error` 保留 `:focus` 的分支实际上永远拿不到焦点。
   3. 当根节点已返回但深层子节点仍在加载时再次刷新，`lsp-hierarchy--save-refresh-state`（L1140-L1142）只保存了当前 `(point)` 所在的浅层节点，丢失了尚未加载完成的深层 `restore-focus` 路径。
 
+**核查与处理（已修复）**
+
+- 三个原因均成立。此前的“任意命令取消待恢复焦点”规则也覆盖了普通刷新，prepare 失败和中途重新拍摄快照还会分别清空、缩短目标路径。
+- 新的命令前钩子保留普通 `g`/revert 的恢复意图；导航、其他操作和 `C-u g` 仍取消它。prepare 失败时保留待恢复路径供重试；半完成刷新通过旧快照到新快照的身份映射重定位深层目标，避免把临时停留的祖先当成最终目标。
+- 验证：覆盖 prepare 等待时再次 `g`、失败后 revert、深层加载中再次刷新以及移动/重置后的取消；95 项 ERT 全部通过。
+
 ### 5. 非当前选中窗口显示 Hierarchy Buffer 时，异步恢复焦点未同步 `window-point`
 - **位置**：`lsp-hierarchy--render`（L526-L532）与 `lsp-hierarchy--restore-focus`（L1203-L1223）
 - **原因**：`lsp-hierarchy--render`（L527-L530）先对所有展示该 buffer 的窗口调用 `set-window-point` 恢复旧锚点，最后在 L532 调用 `lsp-hierarchy--restore-focus`（L1218）仅执行了 `(goto-char ...)`。如果异步响应到达时 Hierarchy 窗口不是 `selected-window`（单元测试中 mock 了 `pop-to-buffer` 故未覆盖真实窗口），`goto-char` 不会更新非活动窗口的 `window-point`。

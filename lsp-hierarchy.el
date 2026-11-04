@@ -883,7 +883,7 @@ Failed requests can be retried by clicking their status row.
   (setq-local revert-buffer-function #'lsp-hierarchy--revert)
 
   (setq-local lsp-hierarchy--view (lsp-hierarchy--make-view))
-  (add-hook 'pre-command-hook #'lsp-hierarchy--cancel-restore-focus nil t)
+  (add-hook 'pre-command-hook #'lsp-hierarchy--before-command nil t)
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t))
 
@@ -1134,7 +1134,9 @@ RESTORE is an optional snapshot of expansion and point before refresh."
 
 (defun lsp-hierarchy--save-refresh-state ()
   "Snapshot expansion and point without retaining old nodes or server data."
-  (let ((anchor (lsp-hierarchy--anchor (point))) focus)
+  (let ((anchor (lsp-hierarchy--anchor (point)))
+        (pending (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
+        (replacements (make-hash-table :test 'eq)) focus)
     (cl-labels
         ((save-node (node path)
            (let* ((saved (lsp-hierarchy--make-saved-node
@@ -1142,6 +1144,8 @@ RESTORE is an optional snapshot of expansion and point before refresh."
                           :key (lsp-hierarchy--refresh-key node)
                           :expanded (lsp-hierarchy--node-expanded node)))
                   (path (append path (list saved))))
+             (when-let* ((previous (lsp-hierarchy--node-restore node)))
+               (puthash previous saved replacements))
              (when (eq node (car anchor))
                (setq focus (list path (cadr anchor) (nth 2 anchor))))
              (setf (lsp-hierarchy--saved-node-children saved)
@@ -1162,6 +1166,14 @@ RESTORE is an optional snapshot of expansion and point before refresh."
              saved)))
       (if-let* ((roots (lsp-hierarchy--view-roots lsp-hierarchy--view)))
           (let ((saved (mapcar (lambda (node) (save-node node nil)) roots)))
+            ;; Point may only have reached an ancestor of the pending target.
+            ;; Rebase that deeper path onto snapshots created for fresh rows;
+            ;; unloaded descendants still share their immutable saved records.
+            (when pending
+              (setq focus
+                    (cons (mapcar (lambda (old) (or (gethash old replacements) old))
+                                  (car pending))
+                          (cdr pending))))
             (list :roots saved :focus focus))
         ;; Before prepare finishes there are no new rows to snapshot.  Only
         ;; the live focus slot may survive; the original snapshot's focus
@@ -1218,8 +1230,17 @@ only unloaded nodes may start automatically, using their new protocol items."
       (lsp-hierarchy--render-expansion))
     started))
 
+(defun lsp-hierarchy--before-command ()
+  "Preserve pending focus for refresh; let other commands take ownership."
+  ;; A second g/revert continues the same restoration.  Prefix g explicitly
+  ;; requests a reset, while navigation and other actions cancel late jumps.
+  (unless (and (memq this-command '(lsp-hierarchy-refresh revert-buffer revert-buffer-quick))
+               (or (not (eq this-command 'lsp-hierarchy-refresh))
+                   (null current-prefix-arg)))
+    (lsp-hierarchy--cancel-restore-focus)))
+
 (defun lsp-hierarchy--cancel-restore-focus ()
-  "Let the next user command own point, even while refresh is still loading."
+  "Clear pending focus without changing saved expansion choices."
   (when (lsp-hierarchy--view-p lsp-hierarchy--view)
     (setf (lsp-hierarchy--view-restore-focus lsp-hierarchy--view) nil)))
 
@@ -1240,7 +1261,7 @@ Keep waiting only when an open ancestor is still loading the missing path."
       (when node
         (goto-char (lsp-hierarchy--anchor-position
                     (list node (cadr focus) (and (null path) (nth 2 focus))))))
-      (unless (or (eq (lsp-hierarchy--view-status lsp-hierarchy--view) 'loading)
+      (unless (or (memq (lsp-hierarchy--view-status lsp-hierarchy--view) '(loading error))
                   (and path node (lsp-hierarchy--node-expanded node)
                        (memq (lsp-hierarchy--node-load-state node) '(unloaded loading))))
         (lsp-hierarchy--cancel-restore-focus)))))

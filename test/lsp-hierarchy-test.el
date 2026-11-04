@@ -1737,7 +1737,7 @@
       (lsp-hierarchy-refresh)
       (let ((stale (car lsp-hierarchy-test--sent)))
         (should (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
-        ;; A second interactive g first cancels the previous pending focus.
+        ;; An intervening command cancels the previous pending focus.
         (run-hooks 'pre-command-hook)
         (lsp-hierarchy-refresh)
         (should-not (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
@@ -1806,6 +1806,7 @@
         (lsp-hierarchy-refresh)
         (lsp-hierarchy-test--roots "root")
         (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) calls)
+        (let ((this-command 'next-line)) (run-hooks 'pre-command-hook))
         (lsp-hierarchy--goto-node
          (car (lsp-hierarchy--node-call-sites (lsp-hierarchy-test--node "caller"))))
         (lsp-hierarchy-refresh)
@@ -1922,6 +1923,96 @@
       (backward-char)
       (should (equal (get-text-property (point) 'display) lsp-hierarchy-icon-open))
       (should-not (string-match-p "Filter keeps" (get-text-property (point) 'help-echo))))))
+
+
+(defun lsp-hierarchy-test--focused-deep-tree ()
+  "Populate the current type view and leave point on a deep leaf."
+  (lsp-hierarchy-test--roots "root")
+  (lsp-hierarchy-test--toggle "root")
+  (lsp-hierarchy-test--type-children "child")
+  (lsp-hierarchy-test--toggle "child")
+  (lsp-hierarchy-test--type-children "leaf")
+  (lsp-hierarchy--goto-node (lsp-hierarchy-test--node "leaf"))
+  (move-to-column 6))
+
+(defun lsp-hierarchy-test--interactive-refresh (&optional reset)
+  "Run refresh's command hook and interactive body with optional RESET."
+  (let ((this-command 'lsp-hierarchy-refresh)
+        (current-prefix-arg (and reset '(4))))
+    (run-hooks 'pre-command-hook)
+    (call-interactively #'lsp-hierarchy-refresh)))
+
+(ert-deftest lsp-hierarchy-repeated-g-preserves-pending-deep-focus ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show 'type)
+      (lsp-hierarchy-test--focused-deep-tree)
+      (lsp-hierarchy-test--interactive-refresh)
+      (lsp-hierarchy-test--interactive-refresh)
+      (should (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--type-children "child")
+      (lsp-hierarchy-test--type-children "leaf")
+      (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node "leaf")))
+      (should (= 6 (current-column))))))
+
+(ert-deftest lsp-hierarchy-revert-after-prepare-error-retains-deep-focus ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show 'type)
+      (lsp-hierarchy-test--focused-deep-tree)
+      (lsp-hierarchy-test--interactive-refresh)
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                 (lsp-make-json-error :code -32603 :message "Retry prepare") t)
+      (should (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
+      (let ((this-command 'revert-buffer) (current-prefix-arg nil))
+        (run-hooks 'pre-command-hook)
+        (revert-buffer nil t))
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--type-children "child")
+      (lsp-hierarchy-test--type-children "leaf")
+      (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node "leaf")))
+      (should (= 6 (current-column))))))
+
+(ert-deftest lsp-hierarchy-repeated-g-rebases-partially-restored-focus ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show 'type)
+      (lsp-hierarchy-test--focused-deep-tree)
+      (lsp-hierarchy-test--interactive-refresh)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--type-children "child")
+      (let ((old-path (car (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))))
+        (lsp-hierarchy-test--interactive-refresh)
+        (let* ((path (car (lsp-hierarchy--view-restore-focus lsp-hierarchy--view)))
+               (root (car (plist-get (lsp-hierarchy--view-restore lsp-hierarchy--view) :roots)))
+               (child (car (lsp-hierarchy--saved-node-children root))))
+          (should (eq (car path) root))
+          (should (eq (cadr path) child))
+          (should-not (eq (car path) (car old-path)))
+          (should-not (eq (cadr path) (cadr old-path)))
+          (should (eq (nth 2 path) (nth 2 old-path)))))
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--type-children "child")
+      (lsp-hierarchy-test--type-children "leaf")
+      (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node "leaf"))))))
+
+(ert-deftest lsp-hierarchy-movement-and-prefix-refresh-cancel-pending-focus ()
+  (dolist (action '(movement reset))
+    (lsp-hierarchy-test--with-session
+      (with-current-buffer (lsp-hierarchy-test--show 'type)
+        (lsp-hierarchy-test--focused-deep-tree)
+        (lsp-hierarchy-test--interactive-refresh)
+        (if (eq action 'reset)
+            (progn
+              (lsp-hierarchy-test--interactive-refresh t)
+              (should-not (lsp-hierarchy--view-restore lsp-hierarchy--view)))
+          (let ((this-command 'forward-char))
+            (run-hooks 'pre-command-hook))
+          (lsp-hierarchy-test--interactive-refresh))
+        (should-not (lsp-hierarchy--view-restore-focus lsp-hierarchy--view))
+        (lsp-hierarchy-test--roots "root")
+        (when (eq action 'movement)
+          (lsp-hierarchy-test--type-children "child")
+          (lsp-hierarchy-test--type-children "leaf"))
+        (should (eq (lsp-hierarchy--node-at-point) (lsp-hierarchy-test--node "root")))))))
 
 
 (provide 'lsp-hierarchy-test)
