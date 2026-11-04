@@ -2,6 +2,8 @@
 
 本文档定义了 `lsp-hierarchy` 在**最简形式（Minimal Viable Form）**下的核心需求边界，并基于当前 [lsp-hierarchy.el](file:///home/condy/workspace/lsp-hierarchy/lsp-hierarchy.el)（1567 行）与 [test/lsp-hierarchy-test.el](file:///home/condy/workspace/lsp-hierarchy/test/lsp-hierarchy-test.el)（2812 行）梳理出所有可删减、可简化的代码模块，最后给出面向最简形式的重新实现架构。
 
+第一节按当前需求维护；上述行数及第二至七节的方案和实施记录保留为历史，对应各轮修改时的版本。最新导航简化见第八节。
+
 ---
 
 ## 一、 最简形式下的核心需求（Minimal Requirements）
@@ -23,7 +25,7 @@
    - `TAB`：展开/折叠节点、重试失败节点；在叶子节点上移至下一个可见符号。
    - `RET` / `mouse-1`：跳转到符号或调用点源码位置，并压入 `xref` 历史栈。
    - `SPC`：在另一窗口预览源码位置，焦点留在 Hierarchy 窗口，不污染 `xref` 栈。
-   - `n` / `p`：上/下一行；`u` / `<left>`：折叠当前分支或回到父节点；`M-n` / `M-p`：同级兄弟节点跳转。
+   - `n` / `p`：使用 Emacs 内置命令移至下/上一逻辑行，采用标准列保持和边界行为；`u`：回到父节点或当前行所属符号；`<left>`：折叠当前分支或回到父节点。
    - `d`：在原查询位置原地切换方向（Incoming $\leftrightarrow$ Outgoing，Subtypes $\leftrightarrow$ Supertypes）。
    - `g`：在原查询 `origin` marker 处重新发起查询。
 
@@ -269,3 +271,11 @@ README 的模型与生命周期说明已同步；前文保留为原方案和第�
 - 将调用点行插入逻辑内联到 `--insert-subtree`，仍按调用点、子符号、状态行分段，保留各行的归属、源码位置和鼠标动作属性。这里的收益是减少阅读跳转，单次调用本身并不是必须内联的理由。
 
 **本轮结果与验证：** 主文件由 808 行缩减为 773 行，净减少 35 行；原先合计 60～80 行的估计偏高，未为凑行数删除必要的失败清理和状态检查。测试调整为 54 项，新增刷新/切换方向后重建源码快照的回归，并更新固定快照、访问中 buffer 优先和读取失败可重试的测试。在 Emacs 31.1 下，lsp-mode 10.0.0 / 10.0.1 × hash-table / plist 四组严格编译及全部 54 项 ERT 通过，package-lint 通过；稳定版 10.0.0 下真实 clangd 的 UTF-8 / UTF-16 × 四方向八组验证通过，包含深度 0/2、加载中折叠、调用点导航、预览、刷新和方向切换。
+
+## 八、 第五轮精简记录：复用内置行移动，移除同级导航
+
+1. **行移动直接使用 Emacs 命令**：删除 `lsp-hierarchy--move-line`、`lsp-hierarchy-next-line` 和 `lsp-hierarchy-previous-line`，将 `n` / `p` 显式绑定到 `next-logical-line` / `previous-logical-line`。采用原生命令的列保持和边界行为，允许移到末尾空行；不再额外钳制到最后一个树行。`special-mode` 本身没有 `n` / `p` 绑定，因此保留模式中的显式绑定。
+2. **删除同级导航功能**：移除 `lsp-hierarchy--move-sibling`、`lsp-hierarchy-next-sibling`、`lsp-hierarchy-previous-sibling` 及 `M-n` / `M-p` 绑定。仍可通过行移动、`TAB` 和父节点命令浏览树。
+3. **调整导航测试与文档**：移除自定义行移动边界和同级跳转的测试要求，保留 `TAB` 在最终叶子或调用点停留、跳到后续符号及父节点导航的回归。README 已同步按键、标准行移动边界及旧命令迁移说明；第一节核心按键集同步更新，前几轮方案及验证结果保留为历史。
+
+主文件由 773 行缩减为 734 行。在 Emacs 31.1 下，lsp-mode 10.0.0 / 10.0.1 × hash-table / plist 四组严格编译通过，各 54 项 ERT 全部通过，package-lint 通过。

@@ -578,23 +578,6 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
         (lsp-hierarchy--view-status lsp-hierarchy--view) 'ready)
   (lsp-hierarchy--expand-nodes roots lsp-hierarchy-expand-depth))
 
-(defun lsp-hierarchy--move-line (count)
-  "Move COUNT rows, clamping at the last nonempty row."
-  (let ((column (current-column)))
-    (forward-line count)
-    (when (and (eobp) (bolp) (not (bobp))) (forward-line -1))
-    (move-to-column column)))
-
-(defun lsp-hierarchy-next-line (&optional count)
-  "Move forward COUNT rows."
-  (interactive "p")
-  (lsp-hierarchy--move-line (or count 1)))
-
-(defun lsp-hierarchy-previous-line (&optional count)
-  "Move backward COUNT rows."
-  (interactive "p")
-  (lsp-hierarchy--move-line (- (or count 1))))
-
 (defun lsp-hierarchy--goto-node (node)
   "Go to NODE's symbol row."
   (goto-char (or (and node (text-property-any (point-min) (point-max) 'lsp-hierarchy-item node))
@@ -608,27 +591,6 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
      (if (or (lsp-hierarchy--get-prop 'lsp-hierarchy-call-site)
              (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node))
          node (or (lsp-hierarchy--node-parent node) (user-error "No parent node"))))))
-
-(defun lsp-hierarchy--move-sibling (backward)
-  "Go to a sibling, moving BACKWARD when non-nil."
-  (let* ((node (or (lsp-hierarchy--node-at-point) (user-error "No node here")))
-         (site (lsp-hierarchy--get-prop 'lsp-hierarchy-call-site))
-         (parent (lsp-hierarchy--node-parent node))
-         (siblings (cond (site (lsp-hierarchy--node-call-sites node))
-                         (parent (lsp-hierarchy--node-children parent))
-                         (t (lsp-hierarchy--view-roots lsp-hierarchy--view))))
-         (next (cadr (memq (or site node) (if backward (reverse siblings) siblings)))))
-    (unless next (user-error "No %s sibling" (if backward "previous" "next")))
-    (if site (goto-char (text-property-any (point-min) (point-max) 'lsp-hierarchy-call-site next))
-      (lsp-hierarchy--goto-node next))))
-
-(defun lsp-hierarchy-next-sibling ()
-  "Go to the next sibling, skipping descendants."
-  (interactive) (lsp-hierarchy--move-sibling nil))
-
-(defun lsp-hierarchy-previous-sibling ()
-  "Go to the previous sibling, skipping descendants."
-  (interactive) (lsp-hierarchy--move-sibling t))
 
 (defun lsp-hierarchy-collapse-or-parent ()
   "Fold the current branch, or go to its parent if already closed."
@@ -704,9 +666,8 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
 (defvar lsp-hierarchy-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
-    (dolist (binding '(("n" . lsp-hierarchy-next-line) ("p" . lsp-hierarchy-previous-line)
+    (dolist (binding '(("n" . next-logical-line) ("p" . previous-logical-line)
                        ("u" . lsp-hierarchy-parent) ("<left>" . lsp-hierarchy-collapse-or-parent)
-                       ("M-n" . lsp-hierarchy-next-sibling) ("M-p" . lsp-hierarchy-previous-sibling)
                        ("TAB" . lsp-hierarchy-toggle) ("<tab>" . lsp-hierarchy-toggle)
                        ("RET" . lsp-hierarchy-goto) ("SPC" . lsp-hierarchy-preview)
                        ("d" . lsp-hierarchy-switch-direction) ("g" . lsp-hierarchy-refresh)
