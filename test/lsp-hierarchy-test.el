@@ -1090,5 +1090,76 @@
       (when (buffer-live-p target) (kill-buffer target))
       (delete-file file))))
 
+(defun lsp-hierarchy-test--click (position)
+  "Dispatch a mouse-1 event through the text keymap at POSITION."
+  (set-window-buffer (selected-window) (current-buffer))
+  (funcall (lookup-key (get-text-property position 'keymap) [mouse-1])
+           (list 'mouse-1 (list (selected-window) position '(0 . 0) 0))))
+
+(ert-deftest lsp-hierarchy-mouse-reuses-keyboard-actions ()
+  (save-window-excursion
+    (lsp-hierarchy-test--with-session
+      (with-current-buffer lsp-hierarchy-test--source (insert "target();\n"))
+      (with-current-buffer (lsp-hierarchy-test--show)
+        (lsp-hierarchy-test--roots "root")
+        (lsp-hierarchy-test--toggle "root")
+        (lsp-hierarchy-test--reply
+         (car lsp-hierarchy-test--sent)
+         (vector (lsp-hierarchy-test--call "caller" nil
+                                          (vector (lsp-hierarchy-test--range 0 0 6)))))
+        (lsp-hierarchy-test--toggle "caller")
+        (let* ((root (lsp-hierarchy-test--node "root"))
+               (site (car (lsp-hierarchy--node-call-sites (lsp-hierarchy-test--node "caller"))))
+               (arrow (lsp-hierarchy-test--node-position root))
+               (name (text-property-any arrow (point-max) 'lsp-hierarchy-action
+                                        #'lsp-hierarchy-goto))
+               (code (text-property-any (lsp-hierarchy-test--node-position site) (point-max)
+                                        'lsp-hierarchy-action #'lsp-hierarchy-goto))
+               actions)
+          (cl-letf (((symbol-function 'lsp-hierarchy-toggle)
+                     (lambda () (interactive)
+                       (push (cons 'toggle (lsp-hierarchy--node-at-point)) actions)))
+                    ((symbol-function 'lsp-hierarchy-goto)
+                     (lambda () (interactive)
+                       (push (cons 'goto (lsp-hierarchy--node-at-point)) actions))))
+            (dolist (position (list arrow name code))
+              (goto-char (point-max))
+              (lsp-hierarchy-test--click position)
+              (should (= position (point)))
+              (should (stringp (get-text-property position 'help-echo)))
+              (should (eq (key-binding (kbd "TAB")) #'lsp-hierarchy-smart-tab))
+              (should (eq (key-binding (kbd "?")) #'describe-mode))))
+          (should (equal (nreverse actions)
+                         (list (cons 'toggle root) (cons 'goto root) (cons 'goto site)))))))))
+
+(ert-deftest lsp-hierarchy-mouse-status-folds-or-retries-owner ()
+  (save-window-excursion
+    (dolist (failed '(nil t))
+      (lsp-hierarchy-test--with-session
+        (with-current-buffer (lsp-hierarchy-test--show)
+          (lsp-hierarchy-test--roots "root")
+          (lsp-hierarchy-test--toggle "root")
+          (when failed
+            (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent)
+                                       (lsp-make-json-error :code -32603 :message "Failed") t))
+          (let* ((root (lsp-hierarchy-test--node "root"))
+                 (status (text-property-any (point-min) (point-max)
+                                            'lsp-hierarchy-status-node root)))
+            (lsp-hierarchy-test--click status)
+            (should (eq (lsp-hierarchy--node-load-state root) 'loading))
+            (should (eq (lsp-hierarchy--node-expanded root) failed))
+            (should (= (length lsp-hierarchy-test--sent) (if failed 3 2)))))))))
+
+(ert-deftest lsp-hierarchy-leaf-expander-has-no-mouse-action ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply (car lsp-hierarchy-test--sent) [])
+      (goto-char (point-min))
+      (should-not (get-text-property (point) 'keymap))
+      (should-not (get-text-property (point) 'lsp-hierarchy-action))
+      (should-not (get-text-property (point) 'help-echo)))))
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here

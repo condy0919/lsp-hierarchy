@@ -235,6 +235,19 @@ NO-MERGE preserves workspace ownership of responses."
 
 ;;; Core: Rendering Engine
 
+(defvar lsp-hierarchy--mouse-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'lsp-hierarchy-mouse-action)
+    (define-key map [mouse-2] #'lsp-hierarchy-mouse-action)
+    map)
+  "Shared mouse bindings for hierarchy actions.
+Keyboard bindings fall through to `lsp-hierarchy-mode-map', including TAB.")
+
+(defun lsp-hierarchy--action-properties (action help)
+  "Return text properties invoking ACTION and displaying HELP."
+  (list 'keymap lsp-hierarchy--mouse-map 'mouse-face 'highlight
+        'follow-link t 'help-echo help 'lsp-hierarchy-action action))
+
 (defun lsp-hierarchy--single-line (text)
   "Return TEXT with line breaks and tabs replaced for a single display row."
   (replace-regexp-in-string "[\t\n\r]+" " " text))
@@ -246,10 +259,14 @@ NO-MERGE preserves workspace ownership of responses."
     (pcase (lsp-hierarchy--node-type item)
       ('code
        ;; Source reads stay lazy: unopened siblings contain only locations.
-       (insert "    " (lsp-hierarchy--extract-line
-                        (lsp-hierarchy--node-uri item)
-                        (lsp-hierarchy--node-range item)
-                        (lsp-hierarchy--node-workspace item))))
+       (insert "    "
+               (apply #'propertize
+                      (lsp-hierarchy--extract-line
+                       (lsp-hierarchy--node-uri item)
+                       (lsp-hierarchy--node-range item)
+                       (lsp-hierarchy--node-workspace item))
+                      (lsp-hierarchy--action-properties
+                       #'lsp-hierarchy-goto "mouse-1, RET: Visit this call site"))))
       ('symbol
        (insert (apply #'propertize "@" 'lsp-hierarchy-icon-marker t
                       (lsp-hierarchy--icon-properties item)) " ")
@@ -259,8 +276,11 @@ NO-MERGE preserves workspace ownership of responses."
                                'face 'lsp-hierarchy-detail-face))))
        ;; Names may contain spaces.  Style protocol fields directly instead
        ;; of parsing a formatted label back into name and signature.
-       (insert (propertize (lsp-hierarchy--single-line (lsp-hierarchy--node-name item))
-                           'face 'lsp-hierarchy-node-face))
+       (insert (apply #'propertize
+                      (lsp-hierarchy--single-line (lsp-hierarchy--node-name item))
+                      'face 'lsp-hierarchy-node-face
+                      (lsp-hierarchy--action-properties
+                       #'lsp-hierarchy-goto "mouse-1, RET: Visit this symbol")))
        (when-let* ((detail (and lsp-hierarchy-detailed-outline
                                (lsp-hierarchy--node-detail item)))
                    ((not (string-empty-p detail))))
@@ -308,10 +328,15 @@ NO-MERGE preserves workspace ownership of responses."
                      (concat (lsp-hierarchy--single-line
                               (lsp-hierarchy--error-message (lsp-hierarchy--node-error node)))
                              " (TAB to retry)"))))
-        (insert (propertize (concat (make-string (* (1+ indent) 2) ?\s) "  " text "\n")
-                            'face (if loading 'lsp-hierarchy-detail-face 'error)
-                            'lsp-hierarchy-loading loading
-                            'lsp-hierarchy-status-node node))))))
+        (insert (apply #'propertize
+                       (concat (make-string (* (1+ indent) 2) ?\s) "  " text "\n")
+                       'face (if loading 'lsp-hierarchy-detail-face 'error)
+                       'lsp-hierarchy-loading loading
+                       'lsp-hierarchy-status-node node
+                       (lsp-hierarchy--action-properties
+                        #'lsp-hierarchy-toggle
+                        (if loading "mouse-1, TAB: Fold this branch"
+                          "mouse-1, TAB: Retry loading children"))))))))
 
 (defun lsp-hierarchy--anchor (position)
   "Describe POSITION by node, column and row kind rather than text offsets."
@@ -379,6 +404,16 @@ can insert rows anywhere above the user's current position."
     (set-buffer-modified-p nil)))
 
 ;;; Core: Interaction Logic
+
+(defun lsp-hierarchy-mouse-action (event)
+  "Invoke the hierarchy action at mouse EVENT."
+  (interactive "e")
+  (mouse-set-point event)
+  ;; Store command symbols on the text, not closures over individual nodes.
+  ;; Both mouse and keyboard actions resolve the current model row at point.
+  (let ((action (get-text-property (point) 'lsp-hierarchy-action)))
+    (unless action (user-error "No hierarchy action here"))
+    (call-interactively action)))
 
 (defun lsp-hierarchy--expandable-p (node)
   "Return non-nil if NODE has children or has not yet resolved them.
@@ -592,13 +627,21 @@ Preview does not add an xref history entry or run jump hooks."
 
 (defun lsp-hierarchy--icon-properties (item)
   "Return display properties for ITEM's expander."
-  (list 'face 'lsp-hierarchy-icon-face
-        'display (if (lsp-hierarchy--expandable-p item)
-                     (if (lsp-hierarchy--node-expanded item)
-                         lsp-hierarchy-icon-open
-                       lsp-hierarchy-icon-close)
-                   " ")
-        'mouse-face 'highlight))
+  (let ((expandable (lsp-hierarchy--expandable-p item)))
+    (append
+     (list 'face 'lsp-hierarchy-icon-face
+           'display (if expandable
+                        (if (lsp-hierarchy--node-expanded item)
+                            lsp-hierarchy-icon-open
+                          lsp-hierarchy-icon-close)
+                      " "))
+     (when expandable
+       (lsp-hierarchy--action-properties
+        #'lsp-hierarchy-toggle
+        (cond ((eq (lsp-hierarchy--node-load-state item) 'error)
+               "mouse-1, TAB: Retry loading children")
+              ((lsp-hierarchy--node-expanded item) "mouse-1, TAB: Fold this branch")
+              (t "mouse-1, TAB: Expand this branch")))))))
 
 ;;; Major Mode Definition
 
@@ -616,11 +659,14 @@ Preview does not add an xref history entry or run jump hooks."
     (define-key map (kbd "RET") #'lsp-hierarchy-goto)
     (define-key map (kbd "SPC") #'lsp-hierarchy-preview)
     (define-key map (kbd "g") #'lsp-hierarchy-refresh)
+    (define-key map (kbd "?") #'describe-mode)
     map)
   "Keymap for `lsp-hierarchy-mode'.")
 
 (define-derived-mode lsp-hierarchy-mode special-mode "LSP-Hierarchy"
   "Major mode for viewing LSP hierarchy views.
+Click an arrow to fold or expand a branch, or a name or call site to visit it.
+Failed requests can be retried by clicking their status row.
 \\{lsp-hierarchy-mode-map}"
   :interactive nil
   :group 'lsp-hierarchy
