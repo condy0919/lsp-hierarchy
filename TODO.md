@@ -2,7 +2,7 @@
 
 本文档定义了 `lsp-hierarchy` 在**最简形式（Minimal Viable Form）**下的核心需求边界，并基于当前 [lsp-hierarchy.el](file:///home/condy/workspace/lsp-hierarchy/lsp-hierarchy.el)（1567 行）与 [test/lsp-hierarchy-test.el](file:///home/condy/workspace/lsp-hierarchy/test/lsp-hierarchy-test.el)（2812 行）梳理出所有可删减、可简化的代码模块，最后给出面向最简形式的重新实现架构。
 
-第一节按当前需求维护；上述行数及第二至十节的方案和实施记录保留为历史，对应各轮修改时的版本。最新导航与刷新简化见第十一节，第九节的独立折叠方案已由第十节纠正。
+第一节按当前需求维护；上述行数及第二至十一节的方案和实施记录保留为历史，对应各轮修改时的版本。最新精简评审与实施回复见第十二节，第九节的独立折叠方案已由第十节纠正。
 
 ---
 
@@ -305,3 +305,70 @@ README 和第一节核心按键已同步；第九节仅保留为已被本轮纠�
 3. **四种查询入口保留**：在源码符号处运行 `lsp-hierarchy-show-call` / `lsp-hierarchy-show-type`，通过有无 `C-u` 选择四种方向。README 与第一节核心按键集同步删除 `u` / `d`，前几轮方案及验证结果保留为历史。
 
 主文件由 723 行缩减为 695 行。在 Emacs 31.1 下，lsp-mode 10.0.0 / 10.0.1 × hash-table / plist 四组严格编译通过，各 53 项 ERT 全部通过，package-lint 通过。测试保留行移动、TAB、调用点跳转和重绘祖先回退，并验证四个方向下刷新保持方向、取消旧请求及拒绝旧响应。
+
+---
+
+## 十二、 第九轮待精简项分析（基于 695 行版本）
+
+基于当前 695 行的 `lsp-hierarchy.el`，在不改变对外行为与测试覆盖的前提下，还有以下 **5 处实现细节（合计约 30～38 行）** 可进一步简化：
+
+### 1. 合并 `lsp-hierarchy--fetch-children` 到 `lsp-hierarchy--load-async`，并在构造子节点时直接绑定 `:parent`（节省 ~15 行）
+- **位置**：`lsp-hierarchy--call-nodes`（第 293–303 行）、`lsp-hierarchy--fetch-children`（第 305–322 行）、`lsp-hierarchy--load-async`（第 553–573 行）
+- **现状分析**：
+  - `lsp-hierarchy--fetch-children` 在整个代码库与测试中仅被 `lsp-hierarchy--load-async`（第 559 行）调用一次，两者相隔 250 行，实质上是“发起子节点请求并更新节点状态”的同一流程。
+  - `lsp-hierarchy--call-nodes` 已接收 `parent` 参数，却未在 `lsp-hierarchy--make-node` 时传入 `:parent parent`，导致 `lsp-hierarchy--load-async`（第 564 行）拿到子节点列表后还要额外执行 `(dolist (child children) (setf (lsp-hierarchy--node-parent child) node))`。
+- **简化方式**：
+  - 在 `lsp-hierarchy--call-nodes` 及类型子节点的 `lsp-hierarchy--make-node` 中直接传入 `:parent parent` / `:parent node`，省去事后遍历赋值的 `dolist`。
+  - 将 `lsp-hierarchy--fetch-children` 直接合入 `lsp-hierarchy--load-async`，消除多余的 `callback` / `error-handler` 二次回调包装。
+
+**回复：采纳，已实施。** 请求方法选择、响应转换和节点状态更新现集中在 `lsp-hierarchy--load-async`。调用与类型子节点均在构造时绑定 `parent`，删除事后遍历及 `lsp-hierarchy--fetch-children`。请求仍经原有 `lsp-hierarchy--request` 发送，保留工作区隔离、取消和过期响应保护。
+
+### 2. 移除 `lsp-hierarchy--ancestors-expanded-p`，统一节点及祖先展开检查（节省 ~6 行）
+- **位置**：`lsp-hierarchy--ancestors-expanded-p`（第 525–529 行）与 `lsp-hierarchy--load-async`（第 567–568 行）
+- **现状分析**：
+  - `lsp-hierarchy--ancestors-expanded-p` 从 `(lsp-hierarchy--node-parent node)` 开始递归检查，而其唯一调用处 `lsp-hierarchy--load-async` 又在外部额外写了 `(and (lsp-hierarchy--node-expanded node) (lsp-hierarchy--ancestors-expanded-p node))`。
+- **简化方式**：
+  - 删除独立函数 `lsp-hierarchy--ancestors-expanded-p`，在 `lsp-hierarchy--load-async` 中直接用 `cl-loop` 从 `node` 自身沿 `parent` 链统一检查：
+    ```elisp
+    (cl-loop for cur = node then (lsp-hierarchy--node-parent cur)
+             while cur always (lsp-hierarchy--node-expanded cur))
+    ```
+
+**回复：采纳，已实施。** 删除独立递归函数，在响应回调中使用上述循环同时检查节点自身及祖先。任一节点已折叠时仍缓存返回的子节点，但不会继续自动向下加载。
+
+### 3. 内联 `lsp-hierarchy--prepare-failed`，并在 `lsp-hierarchy--prepare-requests` 中用 `mapcan` 组装根节点（节省 ~10 行）
+- **位置**：`lsp-hierarchy--prepare-failed`（第 324–329 行）与 `lsp-hierarchy--prepare-requests`（第 331–361 行）
+- **现状分析**：
+  - `lsp-hierarchy--prepare-failed` 仅在 `lsp-hierarchy--prepare-requests`（第 339、346 行）内部调用；且根查询阶段 `roots` 本就为 `nil`，`(setf (lsp-hierarchy--view-roots lsp-hierarchy--view) nil)` 属于冗余赋值。
+  - `lsp-hierarchy--prepare-requests`（第 349–353 行）使用 `let (roots)` + `dolist` + `seq-doseq` + `push` + `nreverse` 五层嵌套来收集根节点。
+- **简化方式**：
+  - 将 `cancel` 局部函数统一为 `fail (err)`（含 `unless done` 守卫、设置 `'error` 状态并调用 `lsp-hierarchy--render`），同时作为取消回调和全部请求失败时的统一出口，删除顶层函数 `lsp-hierarchy--prepare-failed`。
+  - 利用 Elisp `mapcar` 原生支持 vector 与 list 的特性，用 `mapcan` + `mapcar` 直接按 `queries` 顺序生成根节点列表传给 `lsp-hierarchy--display`。
+
+**回复：采纳，已实施。** 失败与取消共用局部 `fail`，删除顶层失败函数及新视图中冗余的根节点清空操作。实施时调整了 `done` 的赋值顺序：成功分支自行置位，全部失败则由 `fail` 置位，避免提前设置后被其 `unless done` 守卫跳过。`mapcan` 仅拼接 `mapcar` 新建的节点列表，不修改服务器响应；保留服务器和项目顺序，空响应仍计为成功。
+
+### 4. 用 `cl-loop ... thereis` 简化 `lsp-hierarchy--recursive-occurrence-p`（节省 ~3 行）
+- **位置**：`lsp-hierarchy--recursive-occurrence-p`（第 531–542 行）
+- **现状分析**：
+  - 手动维护 `found` 局部变量与 `(while (and parent (not found)) (setq found ... parent ...))`。
+- **简化方式**：
+  - 直接使用 `cl-loop` 的 `thereis` 子句沿 `parent` 链查找重复符号，省去手动状态变量与步进赋值。
+
+**回复：采纳，已实施。** 改为从父节点开始的 `cl-loop ... thereis`，删除 `found` 变量及手动步进。工作区、URI、起始位置和名称的匹配条件及短路顺序保持不变。
+
+### 5. 消除 `lsp-hierarchy-preview`、`lsp-hierarchy--render` 与 `lsp-hierarchy--prepare` 中的冗余操作（节省 ~4 行）
+- **位置**：`lsp-hierarchy-preview`（第 622 行）、`lsp-hierarchy--render`（第 519–520 行）、`lsp-hierarchy--prepare`（第 397–398 行）
+- **简化方式**：
+  - **`lsp-hierarchy-preview`**：移除外层多余的 `save-excursion`——`display-buffer` 不会改动当前层级 buffer 的 `point`（同窗口报错分支已显式调用 `set-window-point` 恢复），而目标源码 buffer 的坐标计算已在 `with-current-buffer` 和 `lsp-hierarchy--location-point` 内部保护。
+  - **`lsp-hierarchy--render` 与 `lsp-hierarchy--prepare`**：在 `lsp-hierarchy--render` 中仅当找到 `position` 时才执行 `move-to-column`，未找到时直接 `(goto-char (point-min))`，即可删掉 `lsp-hierarchy--prepare` 第 398 行紧随 `render` 之后的 `(goto-char (point-min))`。
+
+**回复：在“不改变对外行为”的前提下不采纳，保留现状。** 两处建议的边界如下：
+
+- **预览的 `save-excursion`**：普通内置显示动作下，删除它的对照验证确实通过。但项目允许自定义 display action，`display-buffer` 可调用 action alist 的 `body-function`；该回调可以移动当前层级 buffer 的 point。探针中让回调将 point 从 3 移至 8，原实现恢复到 3，删除保护后停在 8。`save-selected-window` 恢复窗口和当前 buffer，并不恢复 point。因此这里保留对自定义显示动作的光标保护；这不是默认显示动作的回归。
+- **重绘与首次定位**：当光标处没有节点属性时，例如根查询的加载、空结果或错误提示行，原实现仍保留列位置。实测从第 5 列重绘，提议实现会归零；用户在加载期间移动光标后收到响应时也存在此差异。`prepare` 中的显式归零只负责新查询的初始定位，不应通过改变所有重绘的列恢复规则来替代。
+
+### 本轮实施结果
+
+第 1–4 项已实施，第 5 项保留。主文件由 695 行缩减为 676 行，实际净减 19 行，删除 3 个独立辅助函数；上面的 30～38 行为原建议估算。现有测试及其覆盖要求未删改。
+
+在 Emacs 31.1 下，lsp-mode 10.0.0 / 10.0.1 × hash-table / plist 四组严格编译通过，各 53 项 ERT 全部通过，package-lint 通过。另以临时探针确认祖先在请求期间折叠后仍缓存子节点、停止自动深挖，以及第 5 项所述光标行为差异。

@@ -298,35 +298,9 @@ CANCELLED defaults to FAILURE; the view owns the cancellation token."
             ;; fromRanges belong to the caller: parent for outgoing calls.
             (uri (if outgoing (lsp-hierarchy--item-get parent :uri) (lsp-get item :uri))))
        (lsp-hierarchy--make-node
-        :workspace (lsp-hierarchy--node-workspace parent) :lsp-item item
+        :workspace (lsp-hierarchy--node-workspace parent) :lsp-item item :parent parent
         :call-sites (mapcar (lambda (range) (cons uri range)) (append (lsp-get call :fromRanges) nil)))))
    calls))
-
-(defun lsp-hierarchy--fetch-children (node callback error-handler)
-  "Request NODE's children; deliver nodes to CALLBACK or failures to ERROR-HANDLER."
-  (let* ((direction (lsp-hierarchy--view-direction lsp-hierarchy--view))
-         (workspace (lsp-hierarchy--node-workspace node))
-         (method (pcase direction
-                   ('incoming "callHierarchy/incomingCalls")
-                   ('outgoing "callHierarchy/outgoingCalls")
-                   ('subtypes "typeHierarchy/subtypes")
-                   ('supertypes "typeHierarchy/supertypes"))))
-    (lsp-hierarchy--request
-     workspace method (list :item (lsp-hierarchy--node-lsp-item node))
-     (lambda (result)
-       (funcall callback
-                (if (memq direction '(incoming outgoing))
-                    (lsp-hierarchy--call-nodes result node (eq direction 'outgoing))
-                  (mapcar (lambda (item)
-                            (lsp-hierarchy--make-node :workspace workspace :lsp-item item)) result))))
-     error-handler)))
-
-(defun lsp-hierarchy--prepare-failed (err)
-  "Record ERR and display a failed root request."
-  (setf (lsp-hierarchy--view-roots lsp-hierarchy--view) nil
-        (lsp-hierarchy--view-status lsp-hierarchy--view) 'error
-        (lsp-hierarchy--view-error lsp-hierarchy--view) err)
-  (lsp-hierarchy--render))
 
 (defun lsp-hierarchy--prepare-requests (method queries)
   "Send METHOD for each (WORKSPACE . PARAMS) in QUERIES.
@@ -335,22 +309,26 @@ Display successful results once all requests finish; cancellation aborts."
   ;; release cancellation hooks after the first response, before aggregation.
   (let ((remaining (length queries)) responses errors done)
     (cl-labels
-        ((cancel (err)
-           (unless done (setq done t) (lsp-hierarchy--prepare-failed err)))
+        ((fail (err)
+           (unless done
+             (setq done t)
+             (setf (lsp-hierarchy--view-status lsp-hierarchy--view) 'error
+                   (lsp-hierarchy--view-error lsp-hierarchy--view) err)
+             (lsp-hierarchy--render)))
          (finish (workspace result failed)
            (unless done
              (if failed (push result errors) (push (cons workspace result) responses))
              (when (zerop (cl-decf remaining))
-               (setq done t)
                (if (null responses)
-                   (lsp-hierarchy--prepare-failed
-                    (mapconcat #'lsp-hierarchy--error-message (nreverse errors) "; "))
+                   (fail (mapconcat #'lsp-hierarchy--error-message (nreverse errors) "; "))
+                 (setq done t)
                  ;; Empty replies count as success; preserve server/item order.
-                 (let (roots)
-                   (dolist (query queries)
-                     (seq-doseq (item (cdr (assq (car query) responses)))
-                       (push (lsp-hierarchy--make-node :workspace (car query) :lsp-item item) roots)))
-                   (lsp-hierarchy--display (nreverse roots))))))))
+                 (lsp-hierarchy--display
+                  (mapcan (lambda (query)
+                            (mapcar (lambda (item)
+                                      (lsp-hierarchy--make-node :workspace (car query) :lsp-item item))
+                                    (cdr (assq (car query) responses))))
+                          queries)))))))
       ;; Count all queries first: send failures can complete synchronously.
       (dolist (query queries)
         (unless done
@@ -358,7 +336,7 @@ Display successful results once all requests finish; cancellation aborts."
             (lsp-hierarchy--request
              workspace method (cdr query)
              (lambda (result) (finish workspace result nil))
-             (lambda (err) (finish workspace err t)) #'cancel)))))))
+             (lambda (err) (finish workspace err t)) #'fail)))))))
 
 (defun lsp-hierarchy--prepare (direction &optional target)
   "Prepare DIRECTION, replacing TARGET or the default view.
@@ -522,24 +500,16 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
 
 ;;; Loading and tree navigation
 
-(defun lsp-hierarchy--ancestors-expanded-p (node)
-  "Return non-nil if NODE's ancestors are all expanded."
-  (let ((parent (lsp-hierarchy--node-parent node)))
-    (or (null parent) (and (lsp-hierarchy--node-expanded parent)
-                          (lsp-hierarchy--ancestors-expanded-p parent)))))
-
 (defun lsp-hierarchy--recursive-occurrence-p (node)
   "Return non-nil if NODE repeats a symbol on its ancestor path."
-  (let ((parent (lsp-hierarchy--node-parent node)) found)
-    (while (and parent (not found))
-      (setq found (and (eq (lsp-hierarchy--node-workspace node) (lsp-hierarchy--node-workspace parent))
-                       (equal (lsp-hierarchy--item-get node :uri) (lsp-hierarchy--item-get parent :uri))
-                       ;; Protocol objects may be hash tables or plists.
-                       (lsp--position-equal (lsp-get (lsp-hierarchy--item-get node :selectionRange) :start)
-                                            (lsp-get (lsp-hierarchy--item-get parent :selectionRange) :start))
-                       (equal (lsp-hierarchy--item-get node :name) (lsp-hierarchy--item-get parent :name)))
-            parent (lsp-hierarchy--node-parent parent)))
-    found))
+  (cl-loop for parent = (lsp-hierarchy--node-parent node) then (lsp-hierarchy--node-parent parent)
+           while parent
+           thereis (and (eq (lsp-hierarchy--node-workspace node) (lsp-hierarchy--node-workspace parent))
+                        (equal (lsp-hierarchy--item-get node :uri) (lsp-hierarchy--item-get parent :uri))
+                        ;; Protocol objects may be hash tables or plists.
+                        (lsp--position-equal (lsp-get (lsp-hierarchy--item-get node :selectionRange) :start)
+                                             (lsp-get (lsp-hierarchy--item-get parent :selectionRange) :start))
+                        (equal (lsp-hierarchy--item-get node :name) (lsp-hierarchy--item-get parent :name)))))
 
 (defun lsp-hierarchy--expand-nodes (nodes depth)
   "Expand NODES to DEPTH, batching sibling loading rows."
@@ -552,25 +522,36 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
 
 (defun lsp-hierarchy--load-async (node &optional depth)
   "Request NODE's children and optionally expand to DEPTH."
-  (setf (lsp-hierarchy--node-load-state node) 'loading
-        (lsp-hierarchy--node-error node) nil
-        (lsp-hierarchy--node-expanded node) t)
-  (lsp-hierarchy--render)
-  (lsp-hierarchy--fetch-children
-   node
-   (lambda (children)
-     (setf (lsp-hierarchy--node-children node) children
-           (lsp-hierarchy--node-load-state node) 'loaded)
-     (dolist (child children) (setf (lsp-hierarchy--node-parent child) node))
-     ;; Folded nodes cache replies without reopening or loading deeper paths.
-     (lsp-hierarchy--expand-nodes
-      children (if (and (lsp-hierarchy--node-expanded node)
-                        (lsp-hierarchy--ancestors-expanded-p node))
-                   (1- (or depth 1)) 0)))
-   (lambda (err)
-     (setf (lsp-hierarchy--node-load-state node) 'error
-           (lsp-hierarchy--node-error node) err)
-     (lsp-hierarchy--render))))
+  (let ((direction (lsp-hierarchy--view-direction lsp-hierarchy--view))
+        (workspace (lsp-hierarchy--node-workspace node)))
+    (setf (lsp-hierarchy--node-load-state node) 'loading
+          (lsp-hierarchy--node-error node) nil
+          (lsp-hierarchy--node-expanded node) t)
+    (lsp-hierarchy--render)
+    (lsp-hierarchy--request
+     workspace (pcase direction
+                 ('incoming "callHierarchy/incomingCalls")
+                 ('outgoing "callHierarchy/outgoingCalls")
+                 ('subtypes "typeHierarchy/subtypes")
+                 ('supertypes "typeHierarchy/supertypes"))
+     (list :item (lsp-hierarchy--node-lsp-item node))
+     (lambda (result)
+       (let ((children (if (memq direction '(incoming outgoing))
+                           (lsp-hierarchy--call-nodes result node (eq direction 'outgoing))
+                         (mapcar (lambda (item)
+                                   (lsp-hierarchy--make-node :workspace workspace :lsp-item item :parent node))
+                                 result))))
+         (setf (lsp-hierarchy--node-children node) children
+               (lsp-hierarchy--node-load-state node) 'loaded)
+         ;; Folded nodes cache replies without reopening or loading deeper paths.
+         (lsp-hierarchy--expand-nodes
+          children (if (cl-loop for cur = node then (lsp-hierarchy--node-parent cur)
+                                while cur always (lsp-hierarchy--node-expanded cur))
+                       (1- (or depth 1)) 0))))
+     (lambda (err)
+       (setf (lsp-hierarchy--node-load-state node) 'error
+             (lsp-hierarchy--node-error node) err)
+       (lsp-hierarchy--render)))))
 
 (defun lsp-hierarchy--display (roots)
   "Install ROOTS and apply initial expansion."
