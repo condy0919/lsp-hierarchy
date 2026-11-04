@@ -93,9 +93,14 @@ other than the hierarchy window."
 
 (defun lsp-hierarchy--kind-abbrev (kind)
   "Return a short abbreviation for LSP symbol KIND."
+  ;; Cover every standard SymbolKind using plain text, including kinds that
+  ;; type hierarchies may return in languages without classes or methods.
   (cl-case kind
-    (5 "c") (6 "m") (9 "M") (11 "I") (12 "f")
-    (23 "s") (10 "e") (14 "C") (7 "p") (8 "v") (1 "F")
+    (1 "F") (2 "mod") (3 "ns") (4 "pkg") (5 "c") (6 "m")
+    (7 "p") (8 "v") (9 "M") (10 "e") (11 "I") (12 "f")
+    (13 "var") (14 "C") (15 "str") (16 "num") (17 "bool")
+    (18 "arr") (19 "obj") (20 "key") (21 "null") (22 "em")
+    (23 "s") (24 "evt") (25 "op") (26 "T")
     (t "")))
 
 ;;; Core: View and Node State

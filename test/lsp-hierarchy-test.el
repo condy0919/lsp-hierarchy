@@ -110,6 +110,8 @@
 
 
 (ert-deftest lsp-hierarchy-kind-abbrev-test ()
+  (dolist (kind (number-sequence 1 26))
+    (should-not (string-empty-p (lsp-hierarchy--kind-abbrev kind))))
   "Test kind abbreviation mapping."
   (should (equal (lsp-hierarchy--kind-abbrev 5) "c"))
   (should (equal (lsp-hierarchy--kind-abbrev 6) "m"))
