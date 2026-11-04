@@ -380,7 +380,9 @@ or asks a language server to discover more nodes."
                ;; Visit every loaded child, even beneath folded ancestors.
                (dolist (child (lsp-hierarchy--node-children node))
                  (when (visit child) (setq descendant t)))
-               (when direct
+               ;; Filtering may reveal a path of symbol names, but source
+               ;; excerpts still require the user's expansion choice.
+               (when (and direct (lsp-hierarchy--node-expanded node))
                  (dolist (site (lsp-hierarchy--node-call-sites node))
                    (puthash site t matches)))
                ;; Refresh replaces the cached descendants before loading

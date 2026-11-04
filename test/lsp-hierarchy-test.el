@@ -1835,5 +1835,32 @@
           (should (eq (lsp-hierarchy--node-load-state (lsp-hierarchy-test--node "root")) 'loading)))))))
 
 
+(ert-deftest lsp-hierarchy-filter-keeps-closed-call-sites-lazy ()
+  (lsp-hierarchy-test--with-session
+    (with-current-buffer (lsp-hierarchy-test--show)
+      (lsp-hierarchy-test--roots "root")
+      (lsp-hierarchy-test--toggle "root")
+      (lsp-hierarchy-test--reply
+       (car lsp-hierarchy-test--sent)
+       (vector (lsp-hierarchy-test--call "caller" "file:///unopened.c"
+                                        (vector (lsp-hierarchy-test--range 0 0 3)))))
+      (let* ((caller (lsp-hierarchy-test--node "caller"))
+             (site (car (lsp-hierarchy--node-call-sites caller)))
+             (reads 0))
+        (cl-letf (((symbol-function 'lsp-hierarchy--extract-line)
+                   (lambda (&rest _) (cl-incf reads) "call();")))
+          (lsp-hierarchy-filter "caller")
+          (should (= reads 0))
+          (should-not (lsp-hierarchy-test--node-position site))
+          (lsp-hierarchy-test--toggle "caller")
+          (should (> reads 0))
+          (should (lsp-hierarchy-test--node-position site))
+          (setq reads 0)
+          (lsp-hierarchy-test--toggle "caller")
+          (should-not (lsp-hierarchy-test--node-position site))
+          (should (= reads 0))
+          (should (lsp-hierarchy-test--node-position caller)))))))
+
+
 (provide 'lsp-hierarchy-test)
 ;;; lsp-hierarchy-test.el ends here
