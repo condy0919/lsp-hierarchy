@@ -44,13 +44,13 @@ In the hierarchy buffer:
 | `TAB` | Expand or fold a node; retry a failed request. At a leaf or call site, move to the next visible symbol. |
 | `RET` | Jump to source and record the departure in xref history. |
 | `SPC` | Preview source in another window, keeping focus in the hierarchy. |
-| `n` / `p` | Move by logical lines with standard Emacs column and boundary behavior, including the final empty line. |
+| `C-n` / `C-p` | Move to the next or previous line using standard Emacs navigation. |
 | `g` | Start a fresh query in the current direction at the original position, using the initial expansion depth. |
 | `?` | Show mode help. |
 
 Click an arrow to expand or fold, a symbol or call site to visit source, or an error row to retry. Hover over a symbol or call site to see its URI and line number. The mode line shows the current hierarchy direction.
 
-For custom bindings, use `lsp-hierarchy-toggle` for `TAB` and `next-logical-line` / `previous-logical-line` for `n` / `p`. Standalone parent, sibling, collapse, and direction-switch commands have been removed.
+For custom bindings, use `lsp-hierarchy-toggle` for `TAB`. For line movement, use the standard Emacs `C-n` / `C-p` bindings. Standalone parent, sibling, collapse, and direction-switch commands have been removed.
 
 Nodes load independently and can be folded while a request is pending. Late responses are cached without reopening folded branches. Known call sites appear as soon as their node is expanded, while deeper relationships load separately. Empty nodes become leaves; an empty root response displays `No hierarchy found.` Use `g` to retry a failed root query.
 

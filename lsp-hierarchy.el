@@ -184,13 +184,14 @@ CANCELLED defaults to FAILURE; the view owns the cancellation token."
          (token (make-symbol "hierarchy-request")))
     (puthash token t (lsp-hierarchy--view-requests view))
     (cl-labels ((finish (callback result)
-                 (when (buffer-live-p buffer)
-                   (with-current-buffer buffer
-                     ;; Reject replaced/disposed views and duplicate completions.
-                     (when (and (eq view lsp-hierarchy--view)
-                                (gethash token (lsp-hierarchy--view-requests view)))
-                       (remhash token (lsp-hierarchy--view-requests view))
-                       (when callback (funcall callback result)))))))
+                  (when (buffer-live-p buffer)
+                    (with-current-buffer buffer
+                      ;; Reject replaced/disposed views and duplicate completions.
+                      (when (and (eq view lsp-hierarchy--view)
+                                 (gethash token (lsp-hierarchy--view-requests view)))
+                        (remhash token (lsp-hierarchy--view-requests view))
+                        (when callback
+                          (funcall callback result)))))))
       (condition-case err
           (progn
             (unless (buffer-live-p source)
@@ -258,10 +259,11 @@ CANCELLED defaults to FAILURE; the view owns the cancellation token."
             (widen)
             (save-excursion
               (let* ((start (lsp-hierarchy--position-to-point (lsp-get range :start) workspace))
-                     (beg (line-beginning-position)) (eol (line-end-position))
+                     (beg (line-beginning-position))
+                     (eol (line-end-position))
                      ;; Multi-line ranges highlight only the first displayed line.
                      (end (max start (min eol (lsp-hierarchy--position-to-point
-                                              (lsp-get range :end) workspace)))))
+                                               (lsp-get range :end) workspace)))))
                 (concat (string-trim-left (buffer-substring-no-properties beg start))
                         (propertize (buffer-substring-no-properties start end)
                                     'face 'lsp-hierarchy-call-site-face)
@@ -277,7 +279,8 @@ CANCELLED defaults to FAILURE; the view owns the cancellation token."
                   (save-excursion
                     (lsp-hierarchy--position-to-point
                      (lsp-get range :start) workspace)))))
-    (unless (<= (point-min) target (point-max)) (widen))
+    (unless (<= (point-min) target (point-max))
+      (widen))
     target))
 
 (defun lsp-hierarchy--open-file (uri range &optional workspace)
@@ -296,10 +299,15 @@ CANCELLED defaults to FAILURE; the view owns the cancellation token."
    (lambda (call)
      (let* ((item (lsp-get call (if outgoing :to :from)))
             ;; fromRanges belong to the caller: parent for outgoing calls.
-            (uri (if outgoing (lsp-hierarchy--item-get parent :uri) (lsp-get item :uri))))
+            (uri (if outgoing
+                     (lsp-hierarchy--item-get parent :uri)
+                   (lsp-get item :uri))))
        (lsp-hierarchy--make-node
-        :workspace (lsp-hierarchy--node-workspace parent) :lsp-item item :parent parent
-        :call-sites (mapcar (lambda (range) (cons uri range)) (append (lsp-get call :fromRanges) nil)))))
+        :workspace (lsp-hierarchy--node-workspace parent)
+        :lsp-item item
+        :parent parent
+        :call-sites (mapcar (lambda (range) (cons uri range))
+                            (append (lsp-get call :fromRanges) nil)))))
    calls))
 
 (defun lsp-hierarchy--prepare-requests (method queries)
@@ -307,7 +315,8 @@ CANCELLED defaults to FAILURE; the view owns the cancellation token."
 Display successful results once all requests finish; cancellation aborts."
   ;; Each server needs its own token: lsp-mode's multi-server requests can
   ;; release cancellation hooks after the first response, before aggregation.
-  (let ((remaining (length queries)) responses errors done)
+  (let ((remaining (length queries))
+        responses errors done)
     (cl-labels
         ((fail (err)
            (unless done
@@ -317,7 +326,9 @@ Display successful results once all requests finish; cancellation aborts."
              (lsp-hierarchy--render)))
          (finish (workspace result failed)
            (unless done
-             (if failed (push result errors) (push (cons workspace result) responses))
+             (if failed
+                 (push result errors)
+               (push (cons workspace result) responses))
              (when (zerop (cl-decf remaining))
                (if (null responses)
                    (fail (mapconcat #'lsp-hierarchy--error-message (nreverse errors) "; "))
@@ -370,8 +381,10 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
       (setq lsp-hierarchy--view
             (lsp-hierarchy--make-view :origin origin :direction direction :status 'loading)
             mode-name (pcase direction
-                        ('incoming "Incoming Calls") ('outgoing "Outgoing Calls")
-                        ('subtypes "Subtypes") ('supertypes "Supertypes")))
+                        ('incoming "Incoming Calls")
+                        ('outgoing "Outgoing Calls")
+                        ('subtypes "Subtypes")
+                        ('supertypes "Supertypes")))
       (lsp-hierarchy--render)
       (goto-char (point-min))
       (lsp-hierarchy--prepare-requests method queries))
@@ -388,8 +401,11 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
 
 (defun lsp-hierarchy--action-properties (action help)
   "Return shared text properties for ACTION and HELP."
-  (list 'keymap lsp-hierarchy--mouse-map 'mouse-face 'highlight
-        'follow-link t 'help-echo help 'lsp-hierarchy-action action))
+  (list 'keymap lsp-hierarchy--mouse-map
+        'mouse-face 'highlight
+        'follow-link t
+        'help-echo help
+        'lsp-hierarchy-action action))
 
 (defun lsp-hierarchy--single-line (text)
   "Replace line breaks and tabs in TEXT for display on one row."
@@ -479,7 +495,9 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
     (let ((node (lsp-hierarchy--node-at-point))
           (site (lsp-hierarchy--get-prop 'lsp-hierarchy-call-site))
           (status (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node))
-          (column (current-column)) (inhibit-read-only t) position)
+          (column (current-column))
+          (inhibit-read-only t)
+          position)
       (erase-buffer)
       (pcase (lsp-hierarchy--view-status lsp-hierarchy--view)
         ('loading (insert "Loading hierarchy...\n"))
@@ -566,11 +584,11 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
     (cond ((or (lsp-hierarchy--get-prop 'lsp-hierarchy-call-site)
                (not (lsp-hierarchy--expandable-p node)))
            (when-let* ((next (save-excursion
-                              (cl-loop while (and (zerop (forward-line 1)) (not (eobp)))
-                                       when (and (lsp-hierarchy--node-at-point)
-                                                 (not (lsp-hierarchy--get-prop 'lsp-hierarchy-call-site))
-                                                 (not (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node)))
-                                       return (point)))))
+                               (cl-loop while (and (zerop (forward-line 1)) (not (eobp)))
+                                        when (and (lsp-hierarchy--node-at-point)
+                                                  (not (lsp-hierarchy--get-prop 'lsp-hierarchy-call-site))
+                                                  (not (lsp-hierarchy--get-prop 'lsp-hierarchy-status-node)))
+                                        return (point)))))
              (goto-char next)))
           ((memq (lsp-hierarchy--node-load-state node) '(unloaded error))
            (lsp-hierarchy--load-async node))
@@ -622,12 +640,9 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
 (defvar lsp-hierarchy-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
-    (dolist (binding '(("n" . next-logical-line) ("p" . previous-logical-line)
-                       ("TAB" . lsp-hierarchy-toggle) ("<tab>" . lsp-hierarchy-toggle)
-                       ("RET" . lsp-hierarchy-goto) ("SPC" . lsp-hierarchy-preview)
-                       ("g" . lsp-hierarchy-refresh)
-                       ("?" . describe-mode)))
-      (define-key map (kbd (car binding)) (cdr binding)))
+    (define-key map (kbd "TAB") #'lsp-hierarchy-toggle)
+    (define-key map (kbd "RET") #'lsp-hierarchy-goto)
+    (define-key map (kbd "SPC") #'lsp-hierarchy-preview)
     map)
   "Keymap for `lsp-hierarchy-mode'.")
 
@@ -636,9 +651,13 @@ DIRECTION is `incoming', `outgoing', `subtypes' or `supertypes'."
 \\{lsp-hierarchy-mode-map}"
   :interactive nil
   :group 'lsp-hierarchy
-  (setq-local buffer-undo-list t truncate-lines t indent-tabs-mode nil
-              revert-buffer-function #'lsp-hierarchy-refresh
-              lsp-hierarchy--view (lsp-hierarchy--make-view))
+
+  (setq-local buffer-undo-list t)
+  (setq-local truncate-lines t)
+  (setq-local indent-tabs-mode nil)
+  (setq-local revert-buffer-function #'lsp-hierarchy-refresh)
+  (setq-local lsp-hierarchy--view (lsp-hierarchy--make-view))
+
   (add-hook 'kill-buffer-hook #'lsp-hierarchy--dispose nil t)
   (add-hook 'change-major-mode-hook #'lsp-hierarchy--dispose nil t))
 
