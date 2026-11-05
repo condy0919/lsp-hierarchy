@@ -22,39 +22,38 @@ For a manual installation, install `lsp-mode`, clone this repository, and add it
 
 ## Usage
 
-Run a command with point on a symbol in an LSP-managed source buffer:
+Run a command with point on a symbol in an LSP-managed source buffer. The language server must support the requested call or type hierarchy:
 
-| Command | Default | With `C-u` |
-| --- | --- | --- |
+| Command                       | Default        | With `C-u`     |
+|-------------------------------|----------------|----------------|
 | `M-x lsp-hierarchy-show-call` | Incoming calls | Outgoing calls |
-| `M-x lsp-hierarchy-show-type` | Subtypes | Supertypes |
+| `M-x lsp-hierarchy-show-type` | Subtypes       | Supertypes     |
 
-For example, bind the commands in `lsp-mode-map`:
+For example, bind the commands in `lsp-command-map`:
 
 ```elisp
 (with-eval-after-load 'lsp-mode
-  (define-key lsp-mode-map (kbd "g H c") #'lsp-hierarchy-show-call)
-  (define-key lsp-mode-map (kbd "g H t") #'lsp-hierarchy-show-type))
+  (define-key lsp-command-map (kbd "H c") #'lsp-hierarchy-show-call)
+  (define-key lsp-command-map (kbd "H t") #'lsp-hierarchy-show-type))
 ```
 
-In the hierarchy buffer:
+Call and type hierarchies use separate buffers, `*LSP Call Hierarchy*` and `*LSP Type Hierarchy*`. Running a command again replaces the corresponding view.
 
-| Key | Action |
-| --- | --- |
-| `TAB` | Expand or fold a node; retry a failed request. At a leaf or call site, move to the next visible symbol. |
-| `RET` | Jump to source and record the departure in xref history. |
-| `SPC` | Preview source in another window, keeping focus in the hierarchy. |
-| `C-n` / `C-p` | Move to the next or previous line using standard Emacs navigation. |
-| `g` | Start a fresh query in the current direction at the original position, using the initial expansion depth. |
-| `?` | Show mode help. |
+The package defines these keys in the hierarchy buffer:
+
+| Key   | Command                 | Action                                                                                                  |
+|-------|-------------------------|---------------------------------------------------------------------------------------------------------|
+| `TAB` | `lsp-hierarchy-toggle`  | Expand or fold a node; retry a failed request. At a leaf or call site, move to the next visible symbol. |
+| `RET` | `lsp-hierarchy-goto`    | Jump to source and record the departure in xref history.                                                |
+| `SPC` | `lsp-hierarchy-preview` | Preview source in another window, keeping focus in the hierarchy.                                       |
 
 Click an arrow to expand or fold, a symbol or call site to visit source, or an error row to retry. Hover over a symbol or call site to see its URI and line number. The mode line shows the current hierarchy direction.
 
-For custom bindings, use `lsp-hierarchy-toggle` for `TAB`. For line movement, use the standard Emacs `C-n` / `C-p` bindings. Standalone parent, sibling, collapse, and direction-switch commands have been removed.
+For custom bindings, use `lsp-hierarchy-mode-map` with `lsp-hierarchy-toggle`, `lsp-hierarchy-goto`, `lsp-hierarchy-preview`, or `lsp-hierarchy-refresh`.
 
-Nodes load independently and can be folded while a request is pending. Late responses are cached without reopening folded branches. Known call sites appear as soon as their node is expanded, while deeper relationships load separately. Empty nodes become leaves; an empty root response displays `No hierarchy found.` Use `g` to retry a failed root query.
+Nodes load independently and can be folded while a request is pending. Late responses are cached without reopening folded branches. Known call sites appear as soon as their node is expanded, while deeper relationships load separately. Empty nodes become leaves; an empty root response displays `No hierarchy found.` Run `M-x lsp-hierarchy-refresh` to retry a failed root query.
 
-Refresh uses a source marker that follows edits. Moving point elsewhere in the source buffer does not change this query position. `g` and `M-x revert-buffer` rebuild the tree in the current direction using `lsp-hierarchy-expand-depth`. Replacing or closing a view cancels its pending requests and releases its source snapshots. To query another symbol or direction, run `lsp-hierarchy-show-call` or `lsp-hierarchy-show-type` at the source symbol, with or without `C-u` as shown above.
+Refresh uses a source marker that follows edits. Moving point elsewhere in the source buffer does not change this query position. `M-x lsp-hierarchy-refresh` rebuilds the tree in the current direction using `lsp-hierarchy-expand-depth`. Replacing or closing a view cancels its pending requests and releases its source snapshots. To query another symbol or direction, run `lsp-hierarchy-show-call` or `lsp-hierarchy-show-type` at the source symbol, with or without `C-u` as shown above.
 
 An incoming-call view after expanding a caller:
 
@@ -77,9 +76,11 @@ An incoming-call view after expanding a caller:
 (setq lsp-hierarchy-icon-close "▶")
 ```
 
+Call-site counts describe source locations along a hierarchy edge, not execution counts. Set `lsp-hierarchy-detailed-outline` to `nil` to hide signatures and counts. Faces can be customized through `M-x customize-group RET lsp-hierarchy RET`.
+
 Automatic expansion stops when a symbol repeats along its ancestor path; the repeated occurrence can still be expanded manually. Symbol labels cover standard LSP kinds, and deprecated names use strike-through styling.
 
-Call-site text is read only for displayed call sites. Open source buffers supply their current contents, including unsaved edits; other files use snapshots captured on first read and retained for that view. Use `g` to rebuild the view and read updated files. Failed reads fall back to a line-number label.
+Call-site text is read only for displayed call sites. Open source buffers supply their current contents, including unsaved edits; other files use snapshots captured on first read and retained for that view. Run `M-x lsp-hierarchy-refresh` to rebuild the view and read updated files. Failed reads fall back to a line-number label.
 
 `lsp-hierarchy-display-buffer-action` controls source jumps and previews through the standard Emacs display functions. Matching `display-buffer-alist` rules retain priority. Previews require another window and do not add xref history entries or run jump hooks.
 
@@ -102,7 +103,7 @@ make test
 
 The tests use lsp-mode's response handlers with a controllable transport to exercise cancellation, stale replies, retries, server routing, and out-of-order responses. They also cover expansion, folding, navigation, source previews, Unicode positions, and source caching.
 
-CI tests hash-table and plist protocol objects in separate environments. For a local plist build, set `LSP_USE_PLISTS=true` before installing and compiling dependencies; changing it after compilation does not change generated LSP accessors.
+CI compiles, lints, and tests on Emacs 29.1, 30.2, and snapshot, with hash-table and plist protocol objects in separate environments. Dependencies are resolved from the configured package archives without pinning a specific lsp-mode release. For a local plist build, set `LSP_USE_PLISTS=true` before installing and compiling dependencies; changing it after compilation does not change generated LSP accessors.
 
 ## License
 
